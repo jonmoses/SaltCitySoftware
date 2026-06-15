@@ -40,6 +40,32 @@ def test_columns_by_namespace(tiny_dag):
     assert sum(len(v) for v in cols.values()) == len(vocab)
 
 
+def test_select_vocab_field_and_namespace_filter(tiny_dag):
+    # Propagated labels (ancestors included, roots stripped by select_vocab).
+    # terms_all has an IEA-only MF term (0004); terms_manual does not.
+    train = [
+        _p("a", terms_all={"GO:0000003", "GO:0000004", "GO:0000002", "GO:0000011"},
+           terms_manual={"GO:0000003", "GO:0000002", "GO:0000011"}),
+        _p("b", terms_all={"GO:0000003", "GO:0000004", "GO:0000002", "GO:0000011"},
+           terms_manual={"GO:0000003", "GO:0000002", "GO:0000011"}),
+    ]
+    # MF only, from manual labels: 0004 (IEA-only) must be excluded; 0011 is BP.
+    mf_manual = select_vocab(train, tiny_dag, min_count=2,
+                             field="terms_manual", namespaces=["molecular_function"])
+    assert set(mf_manual.terms) == {"GO:0000003", "GO:0000002"}
+    assert all(ns == "molecular_function" for ns in mf_manual.namespaces)
+
+    # MF only, from terms_all: now the IEA term 0004 is included.
+    mf_all = select_vocab(train, tiny_dag, min_count=2,
+                          field="terms_all", namespaces=["molecular_function"])
+    assert "GO:0000004" in mf_all.terms
+
+    # BP only stays BP.
+    bp = select_vocab(train, tiny_dag, min_count=2,
+                      field="terms_all", namespaces=["biological_process"])
+    assert set(bp.terms) == {"GO:0000011"}
+
+
 def test_build_labels_uses_correct_field(tiny_dag):
     train = [
         _p("a", terms_all={"GO:0000003", "GO:0000004"}, terms_manual={"GO:0000003"}),

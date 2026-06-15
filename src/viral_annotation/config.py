@@ -58,10 +58,51 @@ VIRAL_RECORDS_PATH = DATA_DIR / "viral_reviewed.jsonl"
 # carry it (after propagation). Floors class imbalance; N is data-dependent.
 MIN_TERM_COUNT = 10
 
+# --- Per-namespace evidence policy ------------------------------------------
+# A full-set experiment showed the asymmetric IEA-train/manual-test policy
+# BACKFIRES for Molecular Function in viruses: IEA-MF (InterPro/UniRule domain
+# rules -> generic ligand/nucleotide binding) is nearly disjoint from manual-MF
+# (curated protein-binding/adaptor terms), so training on IEA poisons MF
+# (Fmax 0.09). Training MF manual-only ~doubles it (0.20). BP/CC are robust
+# because their IEA and manual vocabularies overlap. So each namespace gets its
+# own policy. See memory: iea-manual-mf-distribution-shift.
+#
+#   train_pool:  "all" (every train protein) | "manual_having" (>=1 manual term)
+#   train_field: which label set trains the head ("terms_all" = manual+IEA,
+#                "terms_manual" = manual only)
+#   vocab_field: which label set the term vocabulary is selected from
+# Validation/test always score against manual-only labels regardless of policy.
+NAMESPACE_POLICY = {
+    "molecular_function": {
+        "train_pool": "manual_having", "train_field": "terms_manual",
+        "vocab_field": "terms_manual",
+    },
+    "biological_process": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all",
+    },
+    "cellular_component": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all",
+    },
+}
+
 
 # --- Train / val / test split ----------------------------------------------
 SPLIT_RATIOS = (0.70, 0.15, 0.15)  # train, val, test
 SPLIT_SEED = 1337
+
+# Sequence-identity clustering for the rigorous split (docs/03). Whole clusters
+# go to one bucket, so no test protein has a >=30%-identity homolog in train.
+CLUSTER_MIN_SEQ_ID = 0.30
+CLUSTER_COVERAGE = 0.80            # MMseqs2 -c (alignment coverage)
+CLUSTER_WORKDIR = DATA_DIR / "cluster_work"
+
+# Held-out viral family for zero-shot validation (docs/03, SBIR F2). Coronaviridae
+# = the SARS-CoV-2 family the topic cites (Gordon et al. 2020); 69 manual-having
+# proteins, ~2.8% of the set. Entirely excluded from train/val/test, then the
+# model is scored on recovering its known (in-vocab) functions.
+HOLDOUT_FAMILY = "Coronaviridae"
 
 
 # --- Classifier training hyperparameters ------------------------------------

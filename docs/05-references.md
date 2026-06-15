@@ -44,6 +44,7 @@ the annotation pipeline. Links verified June 2026.
     Scale Functional Annotations." *Genomics, Proteomics & Bioinformatics* 21(2):349.
     https://academic.oup.com/gpb/article/21/2/349/7585485 — **LR-ESM**: logistic
     regression on ESM embeddings → GO terms. Direct precedent for our linear design.
+    Local copy: [`NetGO-3.0-paper.pdf`](NetGO-3.0-paper.pdf).
 
 11. **Kulmanov, M. & Hoehndorf, R. (2021).** "DeepGOPlus: improved protein function
     prediction from sequence." *Bioinformatics.* — AFP as large-scale multi-label

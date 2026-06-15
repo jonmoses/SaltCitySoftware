@@ -13,10 +13,12 @@ dist/
 .venv/
 venv/
 
-# Data / model artifacts (large or generated; never commit)
-data/
-!data/.gitkeep
-models/
+# Data / model artifacts (large or generated; never commit).
+# Anchored with a leading slash so these match ONLY the repo-root dirs — an
+# unanchored "data/" would also ignore the src/viral_annotation/data package.
+/data/
+!/data/.gitkeep
+/models/
 *.obo
 *.fasta
 *.fa

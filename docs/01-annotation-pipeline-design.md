@@ -68,6 +68,20 @@ discrete GO annotations  ──►  subcellular localization (DeepLoc-style head
   terms frequent enough to be learnable. CAFA 5 capped term sets near ~1500 (BPO)
   / ~800 (CCO) / ~800 (MFO) by frequency + Information Accretion — a sane template.
 
+### 3b. Evidence-tier policy (empirical — per namespace)
+
+A full-set run surfaced a sharp finding: training on IEA (electronic) labels and
+testing on manual labels **backfires for Molecular Function in viruses**. Viral
+IEA-MF comes from InterPro/UniRule domain rules → generic ligand/nucleotide
+binding; manual-MF is curated protein-binding/adaptor terms. The two are nearly
+disjoint, so IEA training poisons MF (Fmax 0.09 → ~0.19 when trained manual-only).
+BP/CC are robust (their IEA and manual vocabularies overlap). The pipeline
+therefore applies a **per-namespace evidence policy** (`config.NAMESPACE_POLICY`):
+MF trains manual-only on manual-having proteins; BP/CC stay asymmetric (train
+manual+IEA). Val/test always score manual-only. Deeper implication: viral manual-MF
+≈ protein binding ≈ the host-pathogen interaction signal, which may belong to the
+PPI stage rather than domain-style annotation.
+
 ### 4. Hierarchical consistency at inference
 - Raw sigmoids can violate the DAG (child > parent), which is impossible under the
   true-path rule.

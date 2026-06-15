@@ -43,7 +43,7 @@ class ESMEmbedder:
         repr_layer: int | None = None,   # None -> last hidden layer
         device: str | None = None,
         max_length: int = 1022,          # cap residues; long polyproteins are truncated
-        max_tokens: int = 8192,          # token budget per batch (bounds O(L^2) memory)
+        max_tokens: int = 4096,          # token budget per batch (bounds O(L^2) memory)
     ):
         if model_key not in ESM2_MODELS:
             raise KeyError(
@@ -126,6 +126,14 @@ class ESMEmbedder:
             pooled = self._pool(hidden, enc["attention_mask"], torch).cpu().numpy()
             for slot, k in enumerate(idx):
                 results[k] = pooled[slot]
+            # Release this batch's GPU buffers. Without this, the MPS allocator
+            # caches each batch's peak and the high-water mark climbs across
+            # thousands of sequences until it hits the watermark and OOMs.
+            del result, hidden, enc
+            if self._device == "mps":
+                torch.mps.empty_cache()
+            elif self._device == "cuda":
+                torch.cuda.empty_cache()
             i = j
 
         return np.stack(results, axis=0)
