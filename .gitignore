@@ -13,9 +13,10 @@ dist/
 .venv/
 venv/
 
-# Data / model artifacts (large; never commit)
+# Data / model artifacts (large or generated; never commit)
 data/
 !data/.gitkeep
+models/
 *.obo
 *.fasta
 *.fa
