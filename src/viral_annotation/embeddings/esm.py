@@ -24,6 +24,15 @@ from viral_annotation.config import (
 )
 
 
+def _auto_device(torch) -> str:
+    """Pick the best available device: CUDA, then Apple MPS, then CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class ESMEmbedder:
     """Wraps an ESM-2 model to produce pooled per-protein embeddings."""
 
@@ -33,6 +42,8 @@ class ESMEmbedder:
         pooling: str = DEFAULT_POOLING,
         repr_layer: int | None = None,   # None -> last hidden layer
         device: str | None = None,
+        max_length: int = 1022,          # cap residues; long polyproteins are truncated
+        max_tokens: int = 8192,          # token budget per batch (bounds O(L^2) memory)
     ):
         if model_key not in ESM2_MODELS:
             raise KeyError(
@@ -45,6 +56,8 @@ class ESMEmbedder:
         self.pooling = pooling
         self.repr_layer = repr_layer
         self._device = device
+        self.max_length = max_length
+        self.max_tokens = max_tokens
         self._model = None
         self._tokenizer = None
 
@@ -60,35 +73,62 @@ class ESMEmbedder:
         from transformers import AutoModel, AutoTokenizer
 
         if self._device is None:
-            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._device = _auto_device(torch)
         self._tokenizer = AutoTokenizer.from_pretrained(self.spec.hf_name)
         self._model = AutoModel.from_pretrained(self.spec.hf_name).to(self._device).eval()
 
-    def embed(self, sequences: Sequence[str], batch_size: int = 8):
+    def embed(self, sequences: Sequence[str], batch_size: int | None = None):
         """Embed sequences -> numpy array [N x d] of pooled vectors.
 
-        Batch by similar length upstream to minimize padding waste (docs/04).
+        Memory-safe by construction: sequences are truncated to `max_length`,
+        sorted by length so padding is minimal, and packed into batches under a
+        token budget (`max_tokens`) so a few long polyproteins can't OOM the GPU.
+        `batch_size`, if given, caps the per-batch count too. Output order matches
+        the input order. Only the needed layer is materialized.
         """
         self._ensure_loaded()
         import numpy as np
         import torch
 
-        out: list = []
-        for start in range(0, len(sequences), batch_size):
-            batch = list(sequences[start:start + batch_size])
+        seqs = [s[: self.max_length] for s in sequences]
+        order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))
+        results: list = [None] * len(seqs)
+
+        i = 0
+        while i < len(order):
+            # Greedily grow a batch until the token budget (count * longest) is hit.
+            j = i
+            longest = 0
+            while j < len(order):
+                longest = max(longest, len(seqs[order[j]]) + 2)  # +2 for BOS/EOS
+                count = j - i + 1
+                if count * longest > self.max_tokens and j > i:
+                    break
+                if batch_size and count >= batch_size:
+                    j += 1
+                    break
+                j += 1
+
+            idx = order[i:j]
+            batch = [seqs[k] for k in idx]
             enc = self._tokenizer(
-                batch, return_tensors="pt", padding=True, truncation=True
+                batch, return_tensors="pt", padding=True, truncation=True,
+                max_length=self.max_length + 2,
             ).to(self._device)
+            want_layers = self.repr_layer is not None
             with torch.no_grad():
-                result = self._model(**enc, output_hidden_states=True)
+                result = self._model(**enc, output_hidden_states=want_layers)
             hidden = (
-                result.last_hidden_state
-                if self.repr_layer is None
-                else result.hidden_states[self.repr_layer]
+                result.hidden_states[self.repr_layer]
+                if want_layers
+                else result.last_hidden_state
             )  # [B, L, d]
-            pooled = self._pool(hidden, enc["attention_mask"], torch)
-            out.append(pooled.cpu().numpy())
-        return np.concatenate(out, axis=0)
+            pooled = self._pool(hidden, enc["attention_mask"], torch).cpu().numpy()
+            for slot, k in enumerate(idx):
+                results[k] = pooled[slot]
+            i = j
+
+        return np.stack(results, axis=0)
 
     def _pool(self, hidden, attention_mask, torch):
         if self.pooling == "cls":

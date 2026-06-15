@@ -41,3 +41,24 @@ def build_classifier(input_dim: int, num_terms: int, hidden_dims=None, dropout: 
         prev = h
     layers.append(nn.Linear(prev, num_terms))  # final logits; sigmoid applied later
     return nn.Sequential(*layers)
+
+
+def predict_proba(model, X, batch_size: int = 1024):
+    """Run `model` over features X [P x d] and return sigmoid probabilities [P x N].
+
+    Shared by training-time evaluation and serving so the forward path is
+    identical. Accepts a numpy array or torch tensor; returns numpy float32.
+    """
+    import numpy as np
+    import torch
+
+    device = next(model.parameters()).device
+    X_t = torch.as_tensor(np.asarray(X, dtype="float32"))
+    model.eval()
+    out: list = []
+    with torch.no_grad():
+        for start in range(0, len(X_t), batch_size):
+            batch = X_t[start:start + batch_size].to(device)
+            probs = torch.sigmoid(model(batch))
+            out.append(probs.cpu().numpy())
+    return np.concatenate(out, axis=0).astype("float32")

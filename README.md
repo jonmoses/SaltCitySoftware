@@ -31,9 +31,21 @@ sequence (FASTA)
 | `data.download` — fetch `go-basic.obo` | **Working** (stdlib urllib) |
 | `data.fasta` — FASTA read/write | **Working** (stdlib fallback) |
 | `config` — model registry, paths, constants | **Working** |
-| `embeddings.esm` — ESM-2 mean-pooled embeddings | Scaffolded; needs `[ml]` deps |
-| `classifier.model` — multi-label head | Scaffolded; architecture TBD by sweep |
+| `data.labels` — UniProt fetch + manual/IEA evidence tiers + propagation | **Working, tested** |
+| `data.split` — asymmetric random split (val/test manual-only) | **Working, tested** |
+| `data.dataset` — term-vocab selection + multi-hot matrices | **Working, tested** |
+| `embeddings.esm` / `embeddings.cache` — ESM-2 pooled embeddings, cached | **Working** (`[ml]`); length-safe batching |
+| `classifier.model` — linear multi-label head + `predict_proba` | **Working** (`[ml]`); MLP via `hidden_dims` |
+| `training.train` — end-to-end train + per-namespace Fmax eval | **Working** (`[ml]`); `python -m viral_annotation.training.train` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
+
+### First GO classifier — dry-run result (400 proteins)
+
+Validated end-to-end on a 400-protein sample (linear head, ESM-2 650M, manual-only
+test labels, hierarchically corrected). Fmax: MF 0.25, BP 0.23, CC 0.13, overall
+0.27. These are underfit (val Fmax still climbing at the epoch cap; tiny sample) —
+a machinery check, **not** final numbers. Real numbers need the full set, more
+epochs, and the cluster split (see plan / `docs/03`).
 
 ## Setup
 
