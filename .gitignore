@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# Data / model artifacts (large; never commit)
+data/
+!data/.gitkeep
+*.obo
+*.fasta
+*.fa
+*.gaf
+*.gpad
+*.pt
+*.ckpt
+*.npy
+*.npz
+embeddings_cache/
+
+# OS / editor
+.DS_Store
+*.swp

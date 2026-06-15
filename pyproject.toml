@@ -1,0 +1,43 @@
+[project]
+name = "viral-annotation"
+version = "0.0.1"
+description = "Functional annotation pipeline for viral proteins (ESM-2 -> GO terms). SBIR DPA26BZ03-DV014, annotation stage."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+# Core deps are kept minimal so the ontology + metrics modules run with no heavy
+# install. Embedding / training deps live in the optional groups below and are
+# imported lazily, so `import viral_annotation` stays cheap.
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Embedding backbone + classifier training. Heavy; install when you reach Step 1.
+ml = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "scikit-learn>=1.4",
+    "scipy>=1.12",
+]
+# Sequence + ontology tooling.
+bio = [
+    "biopython>=1.83",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+va-download-go = "viral_annotation.data.download:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
