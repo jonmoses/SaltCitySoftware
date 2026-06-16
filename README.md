@@ -42,6 +42,10 @@ sequence (FASTA)
 | `training.train_combined` — **production**: per-namespace pooling (attn MF, mean BP/CC) | **Working** (`[ml]`); `python -m viral_annotation.training.train_combined` |
 | `training.train_ensemble` — + homology/InterPro ensemble (closes zero-shot gap) | **Working** (`[ml]`) |
 | `benchmark.run` — virus-only NetGO temporal benchmark (Fmax/M-AUPR/Smin) | **Working** (`[ml]`); see `docs/06-benchmark.md` |
+| `classifier.serving` — load saved heads + annotate new sequences | **Working** (`[ml]`) |
+| `data.proteomes` — fetch a target virus proteome (TrEMBL incl.) by taxon | **Working** |
+| `threat` / `data.danger_terms` — map predicted GO → danger categories | **Working, tested** |
+| `characterize` — **Stage 3 demo**: annotate a virus → threat profile | **Working** (`[ml]`); `python -m viral_annotation.characterize --panel`; see `docs/07-threat-characterization.md` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
 
 ### GO classifier — full-set result (17,517 viral reviewed proteins)

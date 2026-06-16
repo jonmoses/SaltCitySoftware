@@ -32,6 +32,7 @@ is the other major pillar and is summarized but not the current build target.
 | `04-models-and-tools.md`          | ESM-2 / ESM-C variants, DeepLoc, downstream tools, hardware/timing |
 | `05-references.md`                | Annotated bibliography with URLs |
 | `06-benchmark.md`                 | Virus-only NetGO-3.0-style temporal benchmark (methodology + result) |
+| `07-threat-characterization.md`   | Stage-3 demo: annotate a virus → danger-category threat profile |
 | `glossary.md`                     | Domain term definitions |
 
 ## Status

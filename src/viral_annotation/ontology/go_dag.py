@@ -47,6 +47,9 @@ class GoDag:
             for alt in t.alt_ids:
                 self._alias[alt] = t.id
         self._ancestor_cache: dict[str, frozenset[str]] = {}
+        # Child index (inverse of parents), built lazily on first descendants() call.
+        self._children: dict[str, set[str]] | None = None
+        self._descendant_cache: dict[str, frozenset[str]] = {}
 
     # --- construction -------------------------------------------------------
     @classmethod
@@ -103,6 +106,38 @@ class GoDag:
 
         anc = self._ancestor_cache[primary]
         return frozenset(anc | {primary}) if include_self else anc
+
+    def descendants(self, term_id: str, include_self: bool = True) -> frozenset[str]:
+        """All descendants of a term via is_a/part_of (the inverse of ancestors).
+
+        Memoized like ``ancestors``. Used to expand a high-level "root" term (e.g.
+        a danger category like toxin activity) to every specific term beneath it,
+        so a prediction on any descendant counts as a hit for that category.
+        include_self=True returns the term itself plus its descendants.
+        """
+        primary = self.resolve(term_id)
+        if primary not in self._terms:
+            return frozenset({primary}) if include_self else frozenset()
+
+        if self._children is None:
+            self._children = {}
+            for t in self._terms.values():
+                for parent in t.parents:
+                    self._children.setdefault(parent, set()).add(t.id)
+
+        if primary not in self._descendant_cache:
+            seen: set[str] = set()
+            queue: deque[str] = deque(self._children.get(primary, ()))
+            while queue:
+                cur = queue.popleft()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                queue.extend(self._children.get(cur, ()))
+            self._descendant_cache[primary] = frozenset(seen)
+
+        desc = self._descendant_cache[primary]
+        return frozenset(desc | {primary}) if include_self else desc
 
     def propagate(self, term_ids: Iterable[str]) -> set[str]:
         """True-path propagation: a label set -> set closed under ancestors.

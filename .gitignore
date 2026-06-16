@@ -19,6 +19,8 @@ venv/
 /data/
 !/data/.gitkeep
 /models/
+# Generated run outputs (threat profiles, etc.) — regenerable, can be large.
+/results/
 *.obo
 *.fasta
 *.fa
