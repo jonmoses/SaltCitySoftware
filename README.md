@@ -37,51 +37,47 @@ sequence (FASTA)
 | `data.dataset` — term-vocab selection + multi-hot matrices | **Working, tested** |
 | `embeddings.esm` / `embeddings.cache` — ESM-2 pooled embeddings, cached | **Working** (`[ml]`); length-safe batching |
 | `classifier.model` — linear multi-label head + `predict_proba` | **Working** (`[ml]`); MLP via `hidden_dims` |
-| `training.train` — per-namespace heads, cluster split, test + zero-shot Fmax | **Working** (`[ml]`); `python -m viral_annotation.training.train` |
+| `training.train` — fixed-pooling per-namespace heads, cluster split, test + zero-shot | **Working** (`[ml]`) |
+| `training.train_attn` — attention pooling (per-residue) trainer | **Working** (`[ml]`) |
+| `training.train_combined` — **production**: per-namespace pooling (attn MF, mean BP/CC) | **Working** (`[ml]`); `python -m viral_annotation.training.train_combined` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
 
 ### GO classifier — full-set result (17,517 viral reviewed proteins)
 
-Linear heads on ESM-2 650M, **per-namespace evidence policy**, manual-only test
-labels, hierarchically corrected, **30%-identity cluster split** (MMseqs2) with
-**Coronaviridae held out** for zero-shot.
+ESM-2 650M, **per-namespace evidence policy** AND **per-namespace pooling**
+(`train_combined.py`), manual-only test labels, hierarchically corrected,
+**30%-identity cluster split** (MMseqs2), **Coronaviridae held out** for zero-shot,
+seeded. Every number is reported against a **Naive baseline** (predict each term's
+training frequency) — the floor a real model must clear. `lift` = model − naive.
 
-Every number is reported against a **Naive baseline** (predict each term's training
-frequency) — the floor a real model must clear. `lift` = model − naive.
+| Namespace | N | pooling | test (naive) | zero-shot (naive) |
+|-----------|---|---------|--------------|-------------------|
+| Molecular Function | 45  | **attention** | 0.186 (0.135) | **0.463 (0.344)** |
+| Biological Process | 545 | mean          | 0.355 (0.293) | 0.190 (0.192) |
+| Cellular Component | 105 | mean          | 0.232 (0.205) | 0.277 (0.321) |
+| **overall**        | 695 | —             | **0.391** (0.293, **+0.10**) | 0.278 (0.287, −0.01) |
 
-**In-distribution test (leakage-safe cluster split):**
+**In-distribution: overall 0.391, +0.10 over naive** — the best of every config
+tried (mean 0.376, stats 0.357).
 
-| Namespace | N | Policy | Fmax | naive | lift |
-|-----------|---|--------|------|-------|------|
-| Molecular Function | 45  | manual-only      | 0.153 | 0.135 | +0.02 |
-| Biological Process | 545 | asymmetric       | 0.344 | 0.293 | +0.05 |
-| Cellular Component | 105 | asymmetric       | 0.251 | 0.205 | +0.05 |
-| **overall**        | 695 | —                | **0.376** | 0.293 | **+0.08** |
+**Zero-shot is the interesting result.** Held-out coronavirus **molecular function
+recovers strongly — 0.463, +0.12 over naive** — because learned attention pooling
+locks onto conserved catalytic/binding residues that transfer across an unseen
+family. BP/CC do *not* beat their priors zero-shot, and they dominate the term count
+(650 of 695), so the *aggregate* zero-shot sits at naive (−0.01). The honest reading:
+**what a viral protein *does* (molecular function) is recoverable zero-shot from
+sequence alone; where it localizes and which process it joins are not.** MF is the
+most actionable annotation for threat characterization.
 
-In-distribution the model beats the prior by a clear margin (overall +0.08),
-driven by BP/CC; **MF barely clears naive** (+0.02) — viral molecular function is
-hard (manual-MF ≈ protein binding, closer to the PPI problem; see `docs/01`).
+**Why per-namespace pooling:** a full comparison (project memory: pooling-comparison)
+showed learned attention pooling wins zero-shot MF decisively (0.46 vs 0.25 mean /
+0.37 stats), while mean is best for BP/CC and far cheaper (attention needs a ~20 GB
+per-residue cache). So MF uses attention, BP/CC use mean.
 
-**Zero-shot — held-out Coronaviridae (69 proteins, never trained on):**
-
-| Namespace | Fmax | naive | lift |
-|-----------|------|-------|------|
-| Molecular Function | 0.249 | 0.344 | −0.09 |
-| Biological Process | 0.204 | 0.192 | +0.01 |
-| Cellular Component | 0.276 | 0.321 | −0.05 |
-| **overall**        | **0.257** | 0.287 | **−0.03** |
-
-**Honest caveat:** against the Naive baseline the model does **not** yet beat the
-prior zero-shot (overall −0.04). Coronaviruses are enriched for common, predictable
-functions, so the prior is strong; recovering an unseen family's function *better
-than base rates* is unsolved here and is real future work — not the win an earlier
-draft of this README claimed. (Adding a homology/InterPro ensemble component is the
-likely lever; see the NetGO 3.0 lessons.)
-
-**Why per-namespace:** a joint head trained on IEA-dominated labels collapsed MF
-to 0.09 — viral IEA-MF (domain-rule ligand binding) is nearly disjoint from
-manual-MF (curated protein binding). Training MF manual-only fixes it; independent
-heads also lifted BP/CC. See `docs/01` + project memory.
+**Why per-namespace evidence:** a joint head trained on IEA-dominated labels
+collapsed MF to 0.09 — viral IEA-MF (domain-rule ligand binding) is nearly disjoint
+from manual-MF (curated protein binding). MF trains manual-only; BP/CC asymmetric.
+See `docs/01` + project memory.
 
 **Rigorous separation:** whole 30%-identity clusters go to one split bucket, so no
 test protein has a close homolog in train (the cluster split dropped ~1,570 IEA

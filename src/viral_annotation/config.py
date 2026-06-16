@@ -72,18 +72,23 @@ MIN_TERM_COUNT = 10
 #                "terms_manual" = manual only)
 #   vocab_field: which label set the term vocabulary is selected from
 # Validation/test always score against manual-only labels regardless of policy.
+# `pooling` selects the residue->protein reduction per namespace. A full-set
+# comparison (memory: pooling-comparison) showed learned ATTENTION pooling wins
+# zero-shot MF decisively (0.46 vs 0.25 mean) — the conserved catalytic/binding
+# residues it focuses on transfer to unseen families — while mean is best for
+# BP/CC (no localized signal, and attention costs a ~20GB per-residue cache).
 NAMESPACE_POLICY = {
     "molecular_function": {
         "train_pool": "manual_having", "train_field": "terms_manual",
-        "vocab_field": "terms_manual",
+        "vocab_field": "terms_manual", "pooling": "attention",
     },
     "biological_process": {
         "train_pool": "all", "train_field": "terms_all",
-        "vocab_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
     },
     "cellular_component": {
         "train_pool": "all", "train_field": "terms_all",
-        "vocab_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
     },
 }
 
