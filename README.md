@@ -40,6 +40,8 @@ sequence (FASTA)
 | `training.train` — fixed-pooling per-namespace heads, cluster split, test + zero-shot | **Working** (`[ml]`) |
 | `training.train_attn` — attention pooling (per-residue) trainer | **Working** (`[ml]`) |
 | `training.train_combined` — **production**: per-namespace pooling (attn MF, mean BP/CC) | **Working** (`[ml]`); `python -m viral_annotation.training.train_combined` |
+| `training.train_ensemble` — + homology/InterPro ensemble (closes zero-shot gap) | **Working** (`[ml]`) |
+| `benchmark.run` — virus-only NetGO temporal benchmark (Fmax/M-AUPR/Smin) | **Working** (`[ml]`); see `docs/06-benchmark.md` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
 
 ### GO classifier — full-set result (17,517 viral reviewed proteins)

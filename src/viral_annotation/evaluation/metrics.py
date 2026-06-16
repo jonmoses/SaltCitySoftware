@@ -150,6 +150,73 @@ def apply_hierarchical_correction(prob_matrix, vocab, dag):
     return corrected
 
 
+def m_aupr(prob_matrix, true_matrix) -> float:
+    """Term-centric AUPR (NetGO's "M-AUPR"): mean average-precision over GO terms.
+
+    For each term (column) with >=1 positive, area under its precision-recall curve;
+    averaged across terms. Complements protein-centric Fmax.
+    """
+    import numpy as np
+    from sklearn.metrics import average_precision_score
+
+    prob = np.asarray(prob_matrix)
+    true = np.asarray(true_matrix) > 0
+    scores = []
+    for c in range(true.shape[1]):
+        if true[:, c].any():
+            scores.append(average_precision_score(true[:, c], prob[:, c]))
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def information_accretion(label_sets, dag) -> dict[str, float]:
+    """IA(t) = -log2 P(t | parents(t)) from a reference annotation corpus.
+
+    Because the true-path rule makes a term imply its parents, P(t|parents) =
+    count(t) / count(proteins carrying ALL of t's direct parents). Rare, specific
+    terms get high IA; general terms low. Used to weight Smin.
+    """
+    import math
+    from collections import Counter
+
+    sets = [set(s) for s in label_sets]
+    n = len(sets)
+    cnt: Counter = Counter()
+    for s in sets:
+        cnt.update(s)
+
+    ia: dict[str, float] = {}
+    for t, c in cnt.items():
+        term = dag.get(t)
+        parents = {p for p in (term.parents if term else set()) if p in cnt}
+        denom = n if not parents else sum(1 for s in sets if parents <= s)
+        p_cond = c / denom if denom else 0.0
+        ia[t] = -math.log2(p_cond) if 0.0 < p_cond <= 1.0 else 0.0
+    return ia
+
+
+def smin(prob_matrix, true_matrix, ia, terms, thresholds=None) -> float:
+    """Smin (CAFA): min over threshold of sqrt(remaining-uncertainty^2 + misinformation^2).
+
+    ru = IA-weighted true terms missed; mi = IA-weighted terms wrongly predicted;
+    each averaged over proteins. Lower is better. `terms` aligns columns to IA keys.
+    """
+    import numpy as np
+
+    prob = np.asarray(prob_matrix)
+    true = np.asarray(true_matrix) > 0
+    ia_vec = np.array([ia.get(t, 0.0) for t in terms], dtype="float64")
+    if thresholds is None:
+        thresholds = np.linspace(0.01, 1.0, 100)
+
+    best = float("inf")
+    for tau in thresholds:
+        pred = prob >= tau
+        ru = ((true & ~pred).astype("float64") @ ia_vec).mean()   # missed
+        mi = ((pred & ~true).astype("float64") @ ia_vec).mean()   # wrong
+        best = min(best, float(np.sqrt(ru * ru + mi * mi)))
+    return best
+
+
 def fmax_by_namespace(prob_matrix, true_matrix, vocab) -> dict[str, FmaxResult]:
     """Per-namespace + micro-overall Fmax over a prediction matrix.
 
