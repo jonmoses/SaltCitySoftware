@@ -78,8 +78,8 @@ def build_labels(proteins: list, vocab: TermVocab, field: str):
     """
     import numpy as np
 
-    if field not in ("terms_all", "terms_manual"):
-        raise ValueError(f"field must be terms_all or terms_manual, got {field!r}")
+    if field not in ("terms_all", "terms_manual", "terms_iea"):
+        raise ValueError(f"field must be terms_all/terms_manual/terms_iea, got {field!r}")
 
     Y = np.zeros((len(proteins), len(vocab)), dtype="float32")
     for row, p in enumerate(proteins):

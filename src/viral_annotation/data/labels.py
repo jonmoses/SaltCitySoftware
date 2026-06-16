@@ -57,6 +57,9 @@ class LabeledProtein:
     terms_manual: frozenset[str]   # propagate(manual)       -> val/test labels
     n_manual: int                  # raw manual annotations (pre-propagation)
     n_iea: int                     # raw iea annotations (pre-propagation)
+    # propagate(iea) — the InterPro2GO/UniRule signal, independent of manual
+    # labels. A test-time feature for the ensemble; NEVER a training label.
+    terms_iea: frozenset[str] = frozenset()
 
     @property
     def has_manual(self) -> bool:
@@ -162,6 +165,7 @@ def label_proteins(raw: Iterable[RawProtein], dag) -> list[LabeledProtein]:
         iea = [gid for gid, tier in r.annotations if tier == "iea"]
         terms_manual = frozenset(dag.propagate(manual))
         terms_all = frozenset(dag.propagate(manual + iea))
+        terms_iea = frozenset(dag.propagate(iea))
         out.append(
             LabeledProtein(
                 accession=r.accession,
@@ -172,6 +176,7 @@ def label_proteins(raw: Iterable[RawProtein], dag) -> list[LabeledProtein]:
                 terms_manual=terms_manual,
                 n_manual=len(manual),
                 n_iea=len(iea),
+                terms_iea=terms_iea,
             )
         )
     return out

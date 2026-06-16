@@ -57,8 +57,26 @@ training frequency) — the floor a real model must clear. `lift` = model − na
 | Cellular Component | 105 | mean          | 0.232 (0.205) | 0.277 (0.321) |
 | **overall**        | 695 | —             | **0.391** (0.293, **+0.10**) | 0.278 (0.287, −0.01) |
 
-**In-distribution: overall 0.391, +0.10 over naive** — the best of every config
-tried (mean 0.376, stats 0.357).
+**In-distribution: overall 0.391, +0.10 over naive** — the best single-model config
+(mean 0.376, stats 0.357).
+
+#### Ensemble — pLM + homology (BLAST-KNN), `train_ensemble.py`
+
+Late-fusion of the pLM heads with a homology component (MMseqs2 search → bitscore-
+weighted transfer of neighbours' manual labels), weights grid-searched per namespace
+on validation. **This closes the zero-shot gap:**
+
+| | test (naive 0.293) | zero-shot (naive 0.287) |
+|---|---|---|
+| pLM-only | 0.388 (+0.10) | 0.277 (**−0.01**, below prior) |
+| **+ homology** | **0.412 (+0.12)** | **0.345 (+0.06**, above prior) |
+
+Homology flips overall zero-shot from below the naive prior to clearly above it
+(driven by BP, 0.356→0.398) — the system recovers an **unseen viral family's**
+function above base rates, not just MF. A third component (InterPro2GO via the
+UniProt IEA proxy, `terms_iea`) is wired in but gets weight 0: validation-tuned
+weights don't reward its specifically-zero-shot value (a zero-shot tuning holdout
+would be the fix). Homology alone closes the gap.
 
 **Zero-shot is the interesting result.** Held-out coronavirus **molecular function
 recovers strongly — 0.463, +0.12 over naive** — because learned attention pooling
