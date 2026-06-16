@@ -37,21 +37,19 @@ sequence (FASTA)
 | `data.dataset` — term-vocab selection + multi-hot matrices | **Working, tested** |
 | `embeddings.esm` / `embeddings.cache` — ESM-2 pooled embeddings, cached | **Working** (`[ml]`); length-safe batching |
 | `classifier.model` — linear multi-label head + `predict_proba` | **Working** (`[ml]`); MLP via `hidden_dims` |
-| `training.train` — fixed-pooling per-namespace heads, cluster split, test + zero-shot | **Working** (`[ml]`) |
-| `training.train_attn` — attention pooling (per-residue) trainer | **Working** (`[ml]`) |
-| `training.train_combined` — **production**: per-namespace pooling (attn MF, mean BP/CC) | **Working** (`[ml]`); `python -m viral_annotation.training.train_combined` |
-| `training.train_ensemble` — + homology/InterPro ensemble (closes zero-shot gap) | **Working** (`[ml]`) |
-| `benchmark.run` — virus-only NetGO temporal benchmark (Fmax/M-AUPR/Smin) | **Working** (`[ml]`); see `docs/06-benchmark.md` |
+| `training.{pipeline,heads,train}` — one config-driven trainer: pooling (mean/stats/attention/per-namespace) + optional homology ensemble, cluster split, test + zero-shot | **Working** (`[ml]`); `va-train [--pooling P] [--ensemble homology]` |
+| `evaluation.report` — shared per-namespace + overall Fmax-vs-naive tables | **Working** |
+| `benchmark.run` — virus-only NetGO temporal benchmark (Fmax/M-AUPR/Smin) | **Working** (`[ml]`); `va-benchmark`; see `docs/06-benchmark.md` |
 | `classifier.serving` — load saved heads + annotate new sequences | **Working** (`[ml]`) |
 | `data.proteomes` — fetch a target virus proteome (TrEMBL incl.) by taxon | **Working** |
 | `threat` / `data.danger_terms` — map predicted GO → danger categories | **Working, tested** |
-| `characterize` — **Stage 3 demo**: annotate a virus → threat profile | **Working** (`[ml]`); `python -m viral_annotation.characterize --panel`; see `docs/07-threat-characterization.md` |
+| `cli.threat` — **Stage 3 demo**: annotate a virus → threat profile | **Working** (`[ml]`); `va-threat --panel`; see `docs/07-threat-characterization.md` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
 
 ### GO classifier — full-set result (17,517 viral reviewed proteins)
 
 ESM-2 650M, **per-namespace evidence policy** AND **per-namespace pooling**
-(`train_combined.py`), manual-only test labels, hierarchically corrected,
+(`va-train --pooling per-namespace`), manual-only test labels, hierarchically corrected,
 **30%-identity cluster split** (MMseqs2), **Coronaviridae held out** for zero-shot,
 seeded. Every number is reported against a **Naive baseline** (predict each term's
 training frequency) — the floor a real model must clear. `lift` = model − naive.
@@ -66,7 +64,7 @@ training frequency) — the floor a real model must clear. `lift` = model − na
 **In-distribution: overall 0.391, +0.10 over naive** — the best single-model config
 (mean 0.376, stats 0.357).
 
-#### Ensemble — pLM + homology (BLAST-KNN), `train_ensemble.py`
+#### Ensemble — pLM + homology (BLAST-KNN), `va-train --ensemble homology`
 
 Late-fusion of the pLM heads with a homology component (MMseqs2 search → bitscore-
 weighted transfer of neighbours' manual labels), weights grid-searched per namespace
@@ -127,7 +125,7 @@ brew install mmseqs2                        # for the 30%-identity cluster split
 ## First real step
 
 ```bash
-.venv/bin/python -m viral_annotation.data.download   # pulls go-basic.obo into data/
+.venv/bin/va-download-go   # pulls go-basic.obo into data/
 ```
 
 Then load and propagate (see `tests/test_go_dag.py` for usage).

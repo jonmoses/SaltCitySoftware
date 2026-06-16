@@ -30,15 +30,17 @@ from viral_annotation.data.danger_terms import DANGER_CATEGORIES
 
 
 # --- danger map (roots -> descendant term sets) -----------------------------
-def build_danger_map(dag) -> dict[str, frozenset[str]]:
+def build_danger_map(dag, categories=DANGER_CATEGORIES) -> dict[str, frozenset[str]]:
     """Expand each danger category's roots to all descendant terms over `dag`.
 
-    Asserts every root is present and non-obsolete (GoDag drops obsolete terms on
-    load, so a missing root means it was obsoleted/renamed — fail loudly rather
-    than silently characterizing nothing).
+    `categories` selects the pathogen-domain ontology (viral by default; pass
+    `danger_categories("bacterial")` for the bacterial set). Asserts every root is
+    present and non-obsolete (GoDag drops obsolete terms on load, so a missing root
+    means it was obsoleted/renamed — fail loudly rather than silently characterizing
+    nothing).
     """
     out: dict[str, frozenset[str]] = {}
-    for cat in DANGER_CATEGORIES:
+    for cat in categories:
         terms: set[str] = set()
         for root in cat.roots:
             if root not in dag:
@@ -128,10 +130,12 @@ class ProteomeThreat:
     proteins: list[ProteinThreat]
     background: dict[str, float] = field(default_factory=dict)
     standout_threshold: float = 0.15
+    # The danger-category set this profile was built against (viral by default).
+    categories: list = field(default_factory=lambda: DANGER_CATEGORIES)
 
     def category_peaks(self) -> dict[str, float]:
         """Category key -> max confidence seen anywhere in the proteome."""
-        peaks = {cat.key: 0.0 for cat in DANGER_CATEGORIES}
+        peaks = {cat.key: 0.0 for cat in self.categories}
         for p in self.proteins:
             for key, ch in p.categories.items():
                 peaks[key] = max(peaks[key], ch.peak)
@@ -150,11 +154,12 @@ class ProteomeThreat:
 
 # --- characterization -------------------------------------------------------
 def characterize_protein(annotated, danger_map, dag, background=None,
-                         display_floor: float = 0.0) -> ProteinThreat:
+                         display_floor: float = 0.0,
+                         categories=DANGER_CATEGORIES) -> ProteinThreat:
     """Intersect one AnnotatedProtein's terms with each danger category."""
     background = background or {}
     pt = ProteinThreat(accession=annotated.accession, organism=annotated.organism)
-    for cat in DANGER_CATEGORIES:
+    for cat in categories:
         hits = [
             TermHit(go_id=t, name=(dag.get(t).name if dag.get(t) else t),
                     prob=prob, namespace=(dag.namespace_of(t) or ""),
@@ -170,18 +175,20 @@ def characterize_protein(annotated, danger_map, dag, background=None,
 
 def characterize_proteome(name, annotated_list, danger_map, dag,
                           standout_threshold: float = 0.15,
-                          display_floor: float = 0.05) -> ProteomeThreat:
+                          display_floor: float = 0.05,
+                          categories=DANGER_CATEGORIES) -> ProteomeThreat:
     """Characterize every annotated protein and roll up to a ProteomeThreat."""
     background = background_rates(annotated_list, danger_map)
-    proteins = [characterize_protein(a, danger_map, dag, background, display_floor)
+    proteins = [characterize_protein(a, danger_map, dag, background, display_floor, categories)
                 for a in annotated_list]
     return ProteomeThreat(name=name, n_proteins=len(annotated_list), proteins=proteins,
-                          background=background, standout_threshold=standout_threshold)
+                          background=background, standout_threshold=standout_threshold,
+                          categories=categories)
 
 
 # --- reporting --------------------------------------------------------------
-def category_label(key: str) -> str:
-    for cat in DANGER_CATEGORIES:
+def category_label(key: str, categories=DANGER_CATEGORIES) -> str:
+    for cat in categories:
         if cat.key == key:
             return cat.label
     return key
@@ -198,7 +205,7 @@ def format_report(pt: ProteomeThreat, max_terms: int = 4) -> str:
     lines.append("Danger-category fingerprint (peak confidence; which mechanisms are present),")
     lines.append("with the proteins that drive each ABOVE this proteome's baseline (lift):")
     any_standout = False
-    for cat in DANGER_CATEGORIES:
+    for cat in pt.categories:
         peak = peaks[cat.key]
         bar = "#" * int(round(peak * 24))
         lines.append(f"\n  {cat.label:42s} {peak:5.2f} {bar}")

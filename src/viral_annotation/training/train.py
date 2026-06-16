@@ -1,338 +1,258 @@
-"""End-to-end training for the viral GO classifier (docs/01).
+"""Train the viral GO classifier — one config-driven path (docs/01).
 
-Per-namespace evidence policy (config.NAMESPACE_POLICY): a full-set experiment
-showed IEA training poisons Molecular Function in viruses — manual-MF is curated
-protein-binding/adaptor terms, IEA-MF is domain-rule ligand binding, and the two
-are nearly disjoint (MF Fmax 0.09 under IEA training, ~0.20 manual-only). So each
-GO namespace trains its OWN linear head under its own policy:
-  * MF    -> manual-having proteins, manual labels, manual-selected vocab
-  * BP/CC -> all proteins, manual+IEA labels (asymmetric), terms_all vocab
-Validation/test always score on manual-only labels. Heads combine for the overall
-metric. See memory: iea-manual-mf-distribution-shift.
+Per-namespace **evidence policy** (config.NAMESPACE_POLICY) is always applied: a
+full-set experiment showed IEA training poisons Molecular Function in viruses
+(manual-MF is curated protein binding, IEA-MF is domain-rule ligand binding —
+nearly disjoint, MF Fmax 0.09 under IEA training), so MF trains manual-only while
+BP/CC train on manual+IEA. Val/test always score on manual-only labels.
 
-Pipeline: fetch labels -> propagate (tier-split) -> split -> cache ESM embeddings
--> per namespace {select vocab, train head with pos-weighted BCE + early stop on
-val Fmax, hierarchically correct} -> per-namespace + overall Fmax on manual test.
+Pooling and the optional homology ensemble are selectable, so the documented
+experiments reproduce from this one entry point:
+  * --pooling mean      (default; the servable model — best single-pooling)
+  * --pooling stats     (mean|max|min|std, 4d features)
+  * --pooling attention (learned per-residue pooling — wins zero-shot MF; not servable)
+  * --pooling per-namespace  (NAMESPACE_POLICY's choice: attention MF, mean BP/CC)
+  * --ensemble homology (late-fuse a BLAST-KNN component — closes the zero-shot gap)
 
-Run:  python -m viral_annotation.training.train [--limit N] [--epochs E] ...
+Pipeline: load proteins -> cluster split (+ family holdout) -> per namespace
+{select vocab, fit head, hierarchically correct, Fmax vs Naive} -> test + zero-shot
+report -> save (pooled models only). See memory: iea-manual-mf-distribution-shift.
+
+Domain: `--domain {viral,bacterial}` selects a config.PathogenDomain profile (taxon,
+family-holdout rank, evidence/pooling policy, models dir). Defaults resolve from the
+profile, so the viral path is unchanged. See docs/08-bacterial-extension.md.
+
+Run:  python -m viral_annotation.cli.train [--domain D] [--pooling P] [--ensemble homology] ...
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import time
+from types import SimpleNamespace
 
 from viral_annotation.config import (
-    DEFAULT_ESM_MODEL,
-    DEFAULT_POOLING,
+    DEFAULT_DOMAIN,
+    ESM2_MODELS,
     GO_NAMESPACES,
     GO_OBO_PATH,
-    HOLDOUT_FAMILY,
-    MIN_TERM_COUNT,
-    MODELS_DIR,
-    NAMESPACE_POLICY,
-    POS_WEIGHT_CLAMP,
     TRAIN_BATCH_SIZE,
-    TRAIN_EARLY_STOP_PATIENCE,
     TRAIN_EPOCHS,
     TRAIN_LR,
     TRAIN_SEED,
-    TRAIN_WEIGHT_DECAY,
+    get_domain,
 )
-from viral_annotation.classifier.model import build_classifier, predict_proba
-from viral_annotation.data import labels as labels_mod
-from viral_annotation.data.cluster import cluster_sequences
-from viral_annotation.data.dataset import build_labels, select_vocab
-from viral_annotation.data.split import cluster_split, split_proteins
-from viral_annotation.embeddings.cache import embed_records
+from viral_annotation.data.dataset import build_labels
+from viral_annotation.embeddings.residue_cache import cache_residues, residue_cache_dir
+from viral_annotation.evaluation import report
 from viral_annotation.evaluation.metrics import apply_hierarchical_correction, fmax_matrix
 from viral_annotation.ontology import GoDag
+from viral_annotation.training import pipeline
+from viral_annotation.training.heads import fit_namespace
 
-NS_SHORT = {
-    "molecular_function": "MF",
-    "biological_process": "BP",
-    "cellular_component": "CC",
-}
+# Attention-pooling defaults (only used when --pooling attention/per-namespace).
+ATTN_EPOCHS = 100
+ATTN_BATCH = 16
+ATTN_HEADS = 8
+MAX_RESIDUES = 2048
 
+POOLING_CHOICES = ("mean", "stats", "attention", "per-namespace")
 
-def _auto_device(torch) -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def _annotation_stats(proteins) -> str:
-    n_manual = sum(p.n_manual for p in proteins)
-    n_iea = sum(p.n_iea for p in proteins)
-    have_manual = sum(1 for p in proteins if p.has_manual)
-    return (
-        f"{len(proteins)} proteins | manual-having {have_manual} "
-        f"({100 * have_manual / max(len(proteins), 1):.1f}%) | "
-        f"raw annotations manual={n_manual} iea={n_iea}"
-    )
+# Sentinel: "caller didn't specify, fall back to the domain profile's value".
+_USE_DOMAIN = object()
 
 
-def _train_head(Xtr, Ytr, Xva, Yva, *, hidden_dims, epochs, lr, batch_size, device, patience):
-    """Train one multi-label linear/MLP head; early-stop on validation Fmax.
+def _pooling_per_namespace(pooling: str, policy: dict) -> dict[str, str]:
+    """Resolve the --pooling choice to a concrete pooling per namespace."""
+    if pooling == "per-namespace":
+        return {ns: policy[ns]["pooling"] for ns in GO_NAMESPACES}
+    return {ns: pooling for ns in GO_NAMESPACES}
 
-    Returns (best_model, best_val_fmax, epochs_run).
-    """
+
+def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensemble=None,
+        min_count=None, hidden_dims=None, epochs=TRAIN_EPOCHS, lr=TRAIN_LR,
+        batch_size=TRAIN_BATCH_SIZE, holdout_family=_USE_DOMAIN, use_cluster=True,
+        save=True):
     import numpy as np
     import torch
-    from torch import nn
 
-    pos = Ytr.sum(axis=0)
-    neg = Ytr.shape[0] - pos
-    pw = np.clip(neg / np.clip(pos, 1, None), 0, POS_WEIGHT_CLAMP).astype("float32")
-
-    model = build_classifier(Xtr.shape[1], Ytr.shape[1], hidden_dims=hidden_dims).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pw, device=device))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=TRAIN_WEIGHT_DECAY)
-    Xt = torch.tensor(Xtr, device=device)
-    Yt = torch.tensor(Ytr, device=device)
-    n = Xt.shape[0]
-
-    best, best_state, wait, ep = -1.0, None, 0, 0
-    for ep in range(1, epochs + 1):
-        model.train()
-        perm = torch.randperm(n, device=device)
-        for s in range(0, n, batch_size):
-            idx = perm[s:s + batch_size]
-            optimizer.zero_grad()
-            loss = criterion(model(Xt[idx]), Yt[idx])
-            loss.backward()
-            optimizer.step()
-        vf = fmax_matrix(predict_proba(model, Xva), Yva).fmax
-        if vf > best + 1e-4:
-            best, wait = vf, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        else:
-            wait += 1
-            if wait >= patience:
-                break
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    return model, best, ep
-
-
-def run(
-    limit: int | None = None,
-    model_key: str = DEFAULT_ESM_MODEL,
-    pooling: str = DEFAULT_POOLING,
-    repr_layer: int | None = None,
-    min_count: int = MIN_TERM_COUNT,
-    hidden_dims: list[int] | None = None,
-    epochs: int = TRAIN_EPOCHS,
-    lr: float = TRAIN_LR,
-    batch_size: int = TRAIN_BATCH_SIZE,
-    use_cluster: bool = True,
-    holdout_family: str | None = HOLDOUT_FAMILY,
-    window: bool = True,
-    save: bool = True,
-):
-    import numpy as np
-    import torch
+    # Resolve unspecified knobs from the pathogen-domain profile (viral by default).
+    dom = get_domain(domain)
+    policy = dom.namespace_policy
+    model_key = model_key or dom.default_esm_model
+    pooling = pooling or dom.default_pooling
+    min_count = dom.min_term_count if min_count is None else min_count
+    holdout_family = dom.holdout_family if holdout_family is _USE_DOMAIN else holdout_family
 
     t0 = time.time()
-    # Seed weight init + minibatch shuffle so runs are reproducible and windowed-
-    # vs-truncated (and other) A/Bs aren't swamped by training noise.
     torch.manual_seed(TRAIN_SEED)
     np.random.seed(TRAIN_SEED)
-    device = _auto_device(torch)
-    print(f"[1/5] device={device} | loading GO DAG …")
+    device = pipeline.auto_device(torch)
+    hp = SimpleNamespace(model_key=model_key, min_count=min_count, hidden=hidden_dims,
+                         epochs=epochs, attn_epochs=ATTN_EPOCHS, lr=lr, batch=batch_size,
+                         attn_batch=ATTN_BATCH, heads=ATTN_HEADS, max_residues=MAX_RESIDUES,
+                         train_pool_cap=None, input_dim=ESM2_MODELS[model_key].dim)
+    pooling_by_ns = _pooling_per_namespace(pooling, policy)
+
+    print(f"[1/5] domain={domain} | device={device} | pooling={pooling_by_ns} | "
+          f"ensemble={ensemble or 'none'} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
 
-    print(f"[2/5] fetching viral reviewed proteins (limit={limit}) …")
-    raw = list(labels_mod.fetch_raw(limit=limit))
-    proteins = [p for p in labels_mod.label_proteins(raw, dag) if p.sequence]
-    print(f"       {_annotation_stats(proteins)}")
+    print(f"[2/5] fetching {domain} reviewed proteins (limit={limit}) …")
+    proteins = pipeline.load_proteins(dag, limit, query=dom.uniprot_query)
+    print(f"       {pipeline.annotation_stats(proteins)}")
 
-    if use_cluster:
-        print(f"[3/5] clustering at 30% identity (MMseqs2) + split"
-              f"{f', holding out {holdout_family}' if holdout_family else ''} …")
-        clusters = cluster_sequences(proteins)
-        split = cluster_split(proteins, clusters, holdout_family=holdout_family)
-    else:
-        print("[3/5] random split (NOT leakage-safe) …")
-        split = split_proteins(proteins)
-    manual_train = [p for p in split.train if p.has_manual]
-    print(f"       split={'cluster' if use_cluster else 'random'}: {split.summary()} "
-          f"| manual-having train {len(manual_train)}")
+    split = pipeline.make_split(proteins, use_cluster=use_cluster, holdout_family=holdout_family,
+                                family_suffixes=dom.family_suffixes)
+    pools = {"all": split.train, "manual_having": [p for p in split.train if p.has_manual]}
+    print(f"[3/5] {'cluster' if use_cluster else 'random'} split: {split.summary()} "
+          f"| manual-having train {len(pools['manual_having'])}")
     if not split.val or not split.test:
         raise SystemExit("val/test empty — too few manual-having proteins. Increase --limit.")
 
-    # Embed every pool we'll need, once. All cached after the first full run, so
-    # this is instant on re-runs (no ESM forward passes).
-    from viral_annotation.embeddings.esm import ESMEmbedder
+    # Per-residue cache is only needed when some namespace uses attention pooling.
+    cache_dir = None
+    if "attention" in pooling_by_ns.values():
+        print("[4/5] caching per-residue embeddings for attention namespaces …")
+        attn_pools = {policy[ns]["train_pool"] for ns in GO_NAMESPACES
+                      if pooling_by_ns[ns] == "attention"}
+        groups = [pools[p] for p in attn_pools] + [split.val, split.test]
+        groups += [split.holdout] if split.holdout else []
+        for g in groups:
+            cache_residues(g, model_key, None)
+        cache_dir = residue_cache_dir(model_key, None)
+    else:
+        print("[4/5] (pooled features — no per-residue cache needed)")
 
-    embedder = ESMEmbedder(model_key=model_key, pooling=pooling, repr_layer=repr_layer,
-                           window=window)
-    print(f"[4/5] embedding ({model_key}, {pooling}, "
-          f"{'windowed' if window else 'truncated'}) — cached where possible …")
-    pool_prots = {"all": split.train, "manual_having": manual_train}
-    pool_X = {
-        name: embed_records(prots, model_key, pooling, repr_layer, embedder=embedder)[1]
-        for name, prots in pool_prots.items()
-    }
-    _, Xva = embed_records(split.val, model_key, pooling, repr_layer, embedder=embedder)
-    _, Xte = embed_records(split.test, model_key, pooling, repr_layer, embedder=embedder)
-    Xho = (embed_records(split.holdout, model_key, pooling, repr_layer, embedder=embedder)[1]
-           if split.holdout else None)
+    homology_db = pools["manual_having"]   # homology transfers these proteins' manual labels
+    print(f"[5/5] training per-namespace heads{' + homology ensemble' if ensemble else ''} …")
+    heads: dict[str, object] = {}
+    # Accumulated [P x N_ns] blocks for the across-namespace overall metric.
+    test = {"model": [], "true": [], "naive": [], "plm": []}
+    zero = {"model": [], "true": [], "naive": [], "plm": []}
+    test_rows, zero_rows = [], []
 
-    arch = "linear" if not hidden_dims else hidden_dims
-    print(f"[5/5] training per-namespace heads (arch={arch}) …")
-    heads: dict[str, dict] = {}
-    combo_prob, combo_true, combo_naive = [], [], []
     for ns in GO_NAMESPACES:
-        pol = NAMESPACE_POLICY[ns]
-        train_prots = pool_prots[pol["train_pool"]]
-        Xtr = pool_X[pol["train_pool"]]
-        vocab = select_vocab(train_prots, dag, min_count,
-                             field=pol["vocab_field"], namespaces=[ns])
-        if len(vocab) == 0:
-            print(f"       {NS_SHORT[ns]}: empty vocab — skipped")
+        head = fit_namespace(ns, policy[ns], pooling_by_ns[ns], split, pools,
+                             dag, device, cache_dir, hp)
+        if head is None:
+            print(f"       {report.NS_SHORT[ns]}: empty vocab — skipped")
             continue
-        Ytr = build_labels(train_prots, vocab, pol["train_field"])
-        Yva = build_labels(split.val, vocab, "terms_manual")
-        Yte = build_labels(split.test, vocab, "terms_manual")
+        vocab = head.vocab
+        heads[ns] = head
 
-        model, vbest, ep = _train_head(
-            Xtr, Ytr, Xva, Yva, hidden_dims=hidden_dims, epochs=epochs, lr=lr,
-            batch_size=batch_size, device=device, patience=TRAIN_EARLY_STOP_PATIENCE,
-        )
-        prob_te = apply_hierarchical_correction(predict_proba(model, Xte), vocab, dag)
-        res = fmax_matrix(prob_te, Yte)
+        weights = _fit_ensemble_weights(head, split, homology_db, dag, ensemble)
 
-        # Naive baseline: every protein gets the per-term training frequency
-        # (the prior). The floor a real model must clear. Already hierarchically
-        # consistent (parent freq >= child freq after propagation).
-        prior = Ytr.mean(axis=0)
-        naive_te = np.tile(prior, (Yte.shape[0], 1))
-        naive_res = fmax_matrix(naive_te, Yte)
+        def scored(prots):
+            """(pLM prob, final model prob) for a protein set, hierarchically corrected."""
+            plm = apply_hierarchical_correction(head.predict(prots), vocab, dag)
+            if ensemble == "homology":
+                from viral_annotation.classifier.ensemble import fuse
+                from viral_annotation.data.homology import homology_scores
+                fused = fuse({"plm": plm, "homology": homology_scores(prots, homology_db, dag, vocab)},
+                             weights)
+                return plm, apply_hierarchical_correction(fused, vocab, dag)
+            return plm, plm
 
-        heads[ns] = {"vocab": vocab, "model": model, "state": model.state_dict(),
-                     "policy": pol, "result": res, "naive": naive_res, "prior": prior}
-        combo_prob.append(prob_te)
-        combo_true.append(Yte)
-        combo_naive.append(naive_te)
-        print(f"       {NS_SHORT[ns]}: N={len(vocab):4d} pool={pol['train_pool']:13s} "
-              f"train={pol['train_field']:12s} -> Fmax={res.fmax:.4f} "
-              f"(naive {naive_res.fmax:.4f}) "
-              f"(P={res.precision:.3f} R={res.recall:.3f} tau={res.threshold:.2f}) "
-              f"val={vbest:.3f} epochs={ep}")
+        zline = ""
+        _eval_split(ns, head, split.test, scored, dag, test, test_rows, zero_shot=False)
+        if split.holdout:
+            zline = _eval_split(ns, head, split.holdout, scored, dag, zero, zero_rows, zero_shot=True)
+        print(f"       {report.NS_SHORT[ns]} [{head.pooling}]: N={len(vocab):4d} "
+              f"test {test_rows[-1][1].fmax:.4f} (naive {test_rows[-1][2].fmax:.4f}){zline} "
+              f"val={head.val_fmax:.3f} ep={head.epochs}", flush=True)
 
-    # Overall: namespaces own disjoint term sets, so concatenate columns.
-    combo_true_cat = np.concatenate(combo_true, axis=1)
-    overall = fmax_matrix(np.concatenate(combo_prob, axis=1), combo_true_cat)
-    naive_overall = fmax_matrix(np.concatenate(combo_naive, axis=1), combo_true_cat)
-
-    print("\n=== TEST (manual-only labels, hierarchically corrected) ===")
-    print(f"  {'namespace':20s} {'Fmax':>7s}  {'naive':>6s}  {'lift':>6s}")
-    for ns in GO_NAMESPACES:
-        if ns in heads:
-            r, nv = heads[ns]["result"], heads[ns]["naive"]
-            print(f"  {ns:20s} {r.fmax:7.4f}  {nv.fmax:6.4f}  {r.fmax - nv.fmax:+6.4f}  "
-                  f"(P={r.precision:.3f} R={r.recall:.3f} N={r.n_terms})")
-    print(f"  {'overall':20s} {overall.fmax:7.4f}  {naive_overall.fmax:6.4f}  "
-          f"{overall.fmax - naive_overall.fmax:+6.4f}  (N={overall.n_terms})")
-
-    # Zero-shot: recover the held-out family's known functions with the SAME heads.
-    zeroshot = None
-    if split.holdout and Xho is not None:
-        zprob, ztrue, znaive = [], [], []
-        for ns in GO_NAMESPACES:
-            if ns not in heads:
-                continue
-            h = heads[ns]
-            p = apply_hierarchical_correction(predict_proba(h["model"], Xho), h["vocab"], dag)
-            y = build_labels(split.holdout, h["vocab"], "terms_manual")
-            nv = np.tile(h["prior"], (y.shape[0], 1))   # naive = training prior
-            heads[ns]["zeroshot"] = fmax_matrix(p, y)
-            heads[ns]["zeroshot_naive"] = fmax_matrix(nv, y)
-            zprob.append(p); ztrue.append(y); znaive.append(nv)
-        ztrue_cat = np.concatenate(ztrue, axis=1)
-        zeroshot = fmax_matrix(np.concatenate(zprob, axis=1), ztrue_cat)
-        z_naive = fmax_matrix(np.concatenate(znaive, axis=1), ztrue_cat)
-        print(f"\n=== ZERO-SHOT — held-out {holdout_family} "
-              f"({len(split.holdout)} manual-having proteins, never trained on) ===")
-        print(f"  {'namespace':20s} {'Fmax':>7s}  {'naive':>6s}  {'lift':>6s}")
-        for ns in GO_NAMESPACES:
-            if ns in heads and "zeroshot" in heads[ns]:
-                z, zn = heads[ns]["zeroshot"], heads[ns]["zeroshot_naive"]
-                print(f"  {ns:20s} {z.fmax:7.4f}  {zn.fmax:6.4f}  {z.fmax - zn.fmax:+6.4f}  "
-                      f"(P={z.precision:.3f} R={z.recall:.3f} N={z.n_terms})")
-        print(f"  {'overall':20s} {zeroshot.fmax:7.4f}  {z_naive.fmax:6.4f}  "
-              f"{zeroshot.fmax - z_naive.fmax:+6.4f}  (N={zeroshot.n_terms})")
-
+    _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split)
     print(f"\n[done] elapsed {time.time() - t0:.1f}s")
 
     if save:
-        _save_models(heads, overall, model_key, pooling, repr_layer, hidden_dims)
-    out = {**{ns: heads[ns]["result"] for ns in heads}, "overall": overall}
-    if zeroshot is not None:
-        out["zeroshot_overall"] = zeroshot
-    return out
+        _save(heads, pooling, model_key, hidden_dims, test, test_rows, dom.models_dir, policy)
+    return heads
 
 
-def _save_models(heads, overall, model_key, pooling, repr_layer, hidden_dims):
+def _fit_ensemble_weights(head, split, homology_db, dag, ensemble):
+    """Grid-search per-namespace fusion weights on validation (None if no ensemble)."""
+    if ensemble != "homology":
+        return None
+    from viral_annotation.classifier.ensemble import search_weights
+    from viral_annotation.data.homology import homology_scores
+
+    vocab = head.vocab
+    val_comps = {
+        "plm": apply_hierarchical_correction(head.predict(split.val), vocab, dag),
+        "homology": homology_scores(split.val, homology_db, dag, vocab),
+    }
+    weights, _ = search_weights(val_comps, build_labels(split.val, vocab, "terms_manual"))
+    return weights
+
+
+def _eval_split(ns, head, prots, scored, dag, acc, rows, *, zero_shot) -> str:
+    """Score `prots`, append to the accumulators + report rows, and return a
+    zero-shot log fragment (empty for the test split)."""
+    import numpy as np
+
+    Y = build_labels(prots, head.vocab, "terms_manual")
+    plm, model = scored(prots)
+    naive = np.tile(head.prior, (Y.shape[0], 1))
+    res, naive_res = fmax_matrix(model, Y), fmax_matrix(naive, Y)
+    acc["model"].append(model); acc["true"].append(Y)
+    acc["naive"].append(naive); acc["plm"].append(plm)
+    rows.append((ns, res, naive_res))
+    return f" | zero-shot {res.fmax:.4f} (naive {naive_res.fmax:.4f})" if zero_shot else ""
+
+
+def _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split):
+    overall = report.overall_fmax(test["model"], test["true"])
+    overall_naive = report.overall_fmax(test["naive"], test["true"])
+    report.print_table("TEST (manual-only labels, hierarchically corrected)",
+                       test_rows, overall, overall_naive)
+    if ensemble:
+        plm_overall = report.overall_fmax(test["plm"], test["true"])
+        print(f"  (pLM-only overall {plm_overall.fmax:.4f}; ensemble lift "
+              f"{overall.fmax - plm_overall.fmax:+.4f})")
+
+    if split.holdout and zero_rows:
+        z_overall = report.overall_fmax(zero["model"], zero["true"])
+        z_naive = report.overall_fmax(zero["naive"], zero["true"])
+        report.print_table(f"ZERO-SHOT — held-out {holdout_family} "
+                           f"({len(split.holdout)} proteins, never trained on)",
+                           zero_rows, z_overall, z_naive)
+        if ensemble:
+            z_plm = report.overall_fmax(zero["plm"], zero["true"])
+            print(f"  (pLM-only overall {z_plm.fmax:.4f}; ensemble lift "
+                  f"{z_overall.fmax - z_plm.fmax:+.4f})")
+
+
+def _save(heads, pooling, model_key, hidden_dims, test, test_rows, models_dir, policy):
+    """Persist pooled heads (state_dict + meta) under the domain's models dir.
+    Attention heads aren't servable by the lightweight loader, so skip saving when
+    any head used attention pooling."""
     import torch
 
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    torch.save({ns: heads[ns]["state"] for ns in heads}, MODELS_DIR / "go_classifier.pt")
+    if any(h.state is None for h in heads.values()):
+        print("[save] skipped — attention heads aren't servable; use --pooling mean "
+              "for a deployable model.")
+        return
+
+    overall = report.overall_fmax(test["model"], test["true"])
+    models_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({ns: heads[ns].state for ns in heads}, models_dir / "go_classifier.pt")
+    naive_by_ns = {ns: nv for ns, _res, nv in test_rows}
+    res_by_ns = {ns: res for ns, res, _nv in test_rows}
     meta = {
         "esm_model": model_key,
-        "pooling": pooling,
-        "repr_layer": repr_layer,
+        "pooling": pooling,                 # uniform across heads when saved
         "hidden_dims": hidden_dims or [],
         "overall_fmax": overall.fmax,
         "namespaces": {
             ns: {
-                "policy": heads[ns]["policy"],
-                "fmax": heads[ns]["result"].fmax,
-                "naive_fmax": heads[ns]["naive"].fmax,
-                "terms": heads[ns]["vocab"].terms,
+                "policy": policy[ns],
+                "fmax": res_by_ns[ns].fmax,
+                "naive_fmax": naive_by_ns[ns].fmax,
+                "terms": heads[ns].vocab.terms,
             }
             for ns in heads
         },
     }
-    (MODELS_DIR / "go_classifier.meta.json").write_text(json.dumps(meta, indent=2))
-    print(f"[saved] {MODELS_DIR / 'go_classifier.pt'} (+ meta.json)")
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Train the viral GO classifier (per-namespace).")
-    ap.add_argument("--limit", type=int, default=None, help="cap proteins fetched (dry run)")
-    ap.add_argument("--model", dest="model_key", default=DEFAULT_ESM_MODEL)
-    ap.add_argument("--pooling", default=DEFAULT_POOLING, choices=["mean", "cls", "stats"],
-                    help="residue pooling: mean|cls (d) or stats=mean|max|min|std (4d)")
-    ap.add_argument("--min-count", type=int, default=MIN_TERM_COUNT)
-    ap.add_argument("--epochs", type=int, default=TRAIN_EPOCHS)
-    ap.add_argument("--lr", type=float, default=TRAIN_LR)
-    ap.add_argument("--batch-size", type=int, default=TRAIN_BATCH_SIZE)
-    ap.add_argument("--hidden", type=int, nargs="*", default=None,
-                    help="hidden layer widths for an MLP head (default: linear)")
-    ap.add_argument("--random-split", action="store_true",
-                    help="use the old random split instead of the 30%% identity cluster split")
-    ap.add_argument("--holdout-family", default=HOLDOUT_FAMILY,
-                    help="viral family held out for zero-shot eval (empty string to disable)")
-    ap.add_argument("--truncate", action="store_true",
-                    help="truncate long proteins to the cap instead of windowing them")
-    ap.add_argument("--no-save", action="store_true")
-    args = ap.parse_args(argv)
-
-    run(
-        limit=args.limit, model_key=args.model_key, pooling=args.pooling,
-        min_count=args.min_count,
-        hidden_dims=args.hidden, epochs=args.epochs, lr=args.lr,
-        batch_size=args.batch_size, use_cluster=not args.random_split,
-        holdout_family=args.holdout_family or None, window=not args.truncate,
-        save=not args.no_save,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    (models_dir / "go_classifier.meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"[saved] {models_dir / 'go_classifier.pt'} (+ meta.json)")

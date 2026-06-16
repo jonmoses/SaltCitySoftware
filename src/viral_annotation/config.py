@@ -152,3 +152,91 @@ DEFAULT_ESM_MODEL = "650M"
 # Pooling strategy for collapsing [L x d] -> [d]. "mean" is the robust default;
 # "cls" (start-of-sequence token) is the alternative to benchmark.
 DEFAULT_POOLING = "mean"
+
+
+# --- Pathogen-domain profiles -----------------------------------------------
+# The SBIR topic spans viral, bacterial, and parasitic pathogen classes (docs/00,
+# requirement #1). Everything that is domain-specific — the UniProt taxon, the
+# family-rank suffix used for the zero-shot holdout, the held-out family, the
+# per-namespace evidence/pooling policy, and where the trained model lands — is
+# bundled into a PathogenDomain profile so the (domain-agnostic) embedding,
+# clustering, training, and threat machinery can be reused unchanged. Models are
+# trained and served PER DOMAIN (separate heads + vocab), selected by taxonomy.
+
+# Bacteria. Taxonomy 2 = Bacteria. The bacterial set is ~20x the viral one, so:
+#   * pooling defaults to "mean" — the servable config, and the learned-attention
+#     per-residue cache (~hundreds of GB at this scale) is impractical here;
+#   * the term-frequency floor is raised (bigger corpus -> larger vocab otherwise);
+#   * the evidence policy starts ASYMMETRIC for all three namespaces (train on
+#     manual+IEA). Bacterial IEA is rich and reliable (orthology + curated domain
+#     rules), so the viral MF-manual-only fix is NOT assumed to carry over — it is
+#     re-derived by re-running the IEA-vs-manual MF diagnostic and only then
+#     specialized if MF collapses. See docs/08-bacterial-extension.md.
+BACTERIAL_NAMESPACE_POLICY = {
+    ns: {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
+    }
+    for ns in GO_NAMESPACES
+}
+
+
+@dataclass(frozen=True)
+class PathogenDomain:
+    """A pathogen class the pipeline can be trained/served for.
+
+    `models_subdir` is "" for the viral domain (artifacts stay at MODELS_DIR root,
+    preserving the existing models/go_classifier.pt); other domains nest under it.
+    """
+
+    key: str
+    taxon_id: int
+    uniprot_query: str
+    family_suffixes: tuple[str, ...]   # lineage-clade suffixes that mark the holdout rank
+    holdout_family: str | None
+    namespace_policy: dict
+    min_term_count: int
+    default_pooling: str
+    default_esm_model: str
+    models_subdir: str
+
+    @property
+    def models_dir(self) -> Path:
+        return MODELS_DIR / self.models_subdir if self.models_subdir else MODELS_DIR
+
+
+DOMAINS: dict[str, PathogenDomain] = {
+    "viral": PathogenDomain(
+        key="viral",
+        taxon_id=VIRUSES_TAXON_ID,
+        uniprot_query=UNIPROT_VIRAL_QUERY,
+        family_suffixes=("viridae",),          # ICTV family rank
+        holdout_family=HOLDOUT_FAMILY,
+        namespace_policy=NAMESPACE_POLICY,
+        min_term_count=MIN_TERM_COUNT,
+        default_pooling=DEFAULT_POOLING,
+        default_esm_model=DEFAULT_ESM_MODEL,
+        models_subdir="",                      # back-compat: MODELS_DIR root
+    ),
+    "bacterial": PathogenDomain(
+        key="bacterial",
+        taxon_id=2,
+        uniprot_query="(reviewed:true) AND (taxonomy_id:2)",
+        family_suffixes=("aceae",),            # LPSN/NCBI bacterial family rank
+        holdout_family="Francisellaceae",      # tularemia agent; contained, BSL-3
+        namespace_policy=BACTERIAL_NAMESPACE_POLICY,
+        min_term_count=25,                     # higher floor for the ~20x-larger corpus
+        default_pooling="mean",
+        default_esm_model=DEFAULT_ESM_MODEL,
+        models_subdir="bacterial",
+    ),
+}
+
+DEFAULT_DOMAIN = "viral"
+
+
+def get_domain(key: str = DEFAULT_DOMAIN) -> PathogenDomain:
+    """Resolve a domain profile by key, with a helpful error."""
+    if key not in DOMAINS:
+        raise KeyError(f"unknown pathogen domain {key!r}; choose from {list(DOMAINS)}")
+    return DOMAINS[key]

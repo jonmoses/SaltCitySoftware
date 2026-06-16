@@ -6,7 +6,11 @@
   <component name="ChangeListManager">
     <list default="true" id="4bc1f9e0-3406-4f20-a1ae-2dc790013ac8" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/viral_annotation/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/viral_annotation/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/viral_annotation/embeddings/cache.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/viral_annotation/embeddings/cache.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/viral_annotation/embeddings/esm.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/viral_annotation/embeddings/esm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/viral_annotation/training/train.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/viral_annotation/training/train.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -16,6 +20,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "jonmoses"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/jonmoses/SaltCitySoftware.git",
+    "accountId": "c9d2a95f-750f-4ae0-9b31-4d03c9123ca8"
+  }
+}]]></component>
   <component name="ProjectColorInfo"><![CDATA[{
   "associatedIndex": 8
 }]]></component>
@@ -30,7 +46,7 @@
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "master"
+    "git-widget-placeholder": "main"
   }
 }]]></component>
   <component name="SharedIndexes">

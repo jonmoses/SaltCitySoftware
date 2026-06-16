@@ -4,9 +4,9 @@ The SBIR's Stage-3 payoff: take a virus proteome, annotate it with the GO
 classifier, and surface the **dangerous mechanisms** it encodes. Run:
 
 ```bash
-python -m viral_annotation.characterize --panel              # hemorrhagic-fever panel
-python -m viral_annotation.characterize --taxon 2697049 --name sars2
-python -m viral_annotation.characterize --fasta proteome.faa --name sample
+va-threat --panel              # hemorrhagic-fever panel
+va-threat --taxon 2697049 --name sars2
+va-threat --fasta proteome.faa --name sample
 ```
 
 ## How it works
@@ -105,8 +105,8 @@ the family. This is the strongest demonstration of the Stage-3 use case.
   mechanisms). Per the project's pooling finding, molecular function is the most
   reliable zero-shot signal — but the danger signal lives in BP, which is weaker
   out-of-family. In-distribution (this panel) BP is solid.
-- **Persisted model is stats-pooled linear** (overall Fmax 0.357), not the attention
-  MF production head. Retraining/persisting `train_combined` would sharpen calls.
+- **Persisted model is mean-pooled linear** (overall Fmax 0.376), not the attention
+  MF production head. Retraining with `va-train --pooling per-namespace` would sharpen calls.
 - **Triage, not determination.** A danger hit is a confidence-ranked hypothesis that
   a protein participates in a harmful mechanism — a screening signal, not a wet-lab
   result. The danger-term list is a hand-curated, auditable ontology subset.

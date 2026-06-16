@@ -43,6 +43,36 @@ TARGET_VIRUSES: dict[str, TargetVirus] = {
     "marburg": TargetVirus("Orthomarburgvirus marburgense", 3052505, "Filoviridae"),
 }
 
+# Bacterial select-agent panel. Taxon ids verified against UniProt (2026-06), all
+# species rank. `family` is informational EXCEPT Francisellaceae, which is the
+# bacterial model's held-out family — so `tularemia` is the genuine zero-shot target
+# (mirroring SARS-CoV-2 / Coronaviridae on the viral side). `family` reuses the
+# TargetVirus field; it is a target registry, not a virus-only structure.
+TARGET_BACTERIA: dict[str, TargetVirus] = {
+    "anthrax": TargetVirus("Bacillus anthracis", 1392, "Bacillaceae",
+                           "anthrax; Tier-1 select agent"),
+    "plague": TargetVirus("Yersinia pestis", 632, "Yersiniaceae",
+                          "plague; Tier-1 select agent"),
+    "tularemia": TargetVirus("Francisella tularensis", 263, "Francisellaceae",
+                             "tularemia; held-out family -> zero-shot target"),
+    "melioidosis": TargetVirus("Burkholderia pseudomallei", 28450, "Burkholderiaceae",
+                               "melioidosis; Tier-1 select agent"),
+}
+
+# Domain -> its target panel (selected by the threat CLI's --domain).
+TARGETS_BY_DOMAIN: dict[str, dict[str, TargetVirus]] = {
+    "viral": TARGET_VIRUSES,
+    "bacterial": TARGET_BACTERIA,
+}
+
+
+def target_registry(domain: str = "viral") -> dict[str, TargetVirus]:
+    """The named-target panel for a pathogen domain."""
+    if domain not in TARGETS_BY_DOMAIN:
+        raise KeyError(f"no target panel for domain {domain!r}; "
+                       f"choose from {list(TARGETS_BY_DOMAIN)}")
+    return TARGETS_BY_DOMAIN[domain]
+
 
 def target_query(taxon_id: int, reviewed: bool = False) -> str:
     """UniProt query for a virus by taxonomy id; unreviewed included by default."""
@@ -68,18 +98,22 @@ def fetch_target(
     limit: int | None = None,
     use_cache: bool = True,
     dedup: bool = True,
+    registry: dict[str, TargetVirus] | None = None,
 ) -> list[RawProtein]:
-    """Fetch (and cache) one target virus's proteins as RawProtein records.
+    """Fetch (and cache) one target pathogen's proteins as RawProtein records.
 
     Args:
-        name: a key of TARGET_VIRUSES, or a bare taxonomy id as a string/int.
+        name: a key of `registry` (default TARGET_VIRUSES), or a bare taxonomy id.
+        registry: the named-target panel to resolve `name` against (pass
+            `target_registry("bacterial")` for the bacterial panel).
         reviewed: restrict to Swiss-Prot (default False -> include TrEMBL).
         dedup: collapse exact-duplicate sequences (TrEMBL strain copies).
 
     Raises SystemExit if the taxon returns no proteins (fail loud).
     """
-    if name in TARGET_VIRUSES:
-        target = TARGET_VIRUSES[name]
+    registry = registry if registry is not None else TARGET_VIRUSES
+    if name in registry:
+        target = registry[name]
         taxon_id, label = target.taxon_id, name
     else:
         taxon_id, label = int(name), f"taxon{name}"

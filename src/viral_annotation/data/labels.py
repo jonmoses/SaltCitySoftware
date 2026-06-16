@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -67,13 +68,28 @@ class LabeledProtein:
 
 
 # --- fetch ------------------------------------------------------------------
+_REQUEST_TIMEOUT = 60     # seconds per page
+_MAX_RETRIES = 4          # the full viral set is ~35 pages; one flaky page shouldn't kill the run
+
+
 def _get(url: str) -> tuple[dict, str | None]:
-    """GET JSON + the rel="next" cursor URL from the Link header, if any."""
+    """GET JSON + the rel="next" cursor URL from the Link header, with retries.
+
+    UniProt's cursor stream is dozens of pages for the full viral set; a single
+    transient timeout would otherwise abort the whole fetch, so retry with backoff.
+    """
+    import time
+
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-        next_url = _parse_next_link(resp.headers.get("Link"))
-    return payload, next_url
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return payload, _parse_next_link(resp.headers.get("Link"))
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == _MAX_RETRIES:
+                raise
+            time.sleep(2 ** attempt)  # 2s, 4s, 8s backoff
 
 
 def _parse_next_link(link_header: str | None) -> str | None:

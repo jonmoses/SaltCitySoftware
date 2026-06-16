@@ -4,12 +4,11 @@ Temporal (CAFA) split from QuickGO dated experimental annotations, then evaluate
 Naive / BLAST-KNN / LR-ESM / Ensemble with Fmax + M-AUPR + Smin per ontology —
 the structure of NetGO 3.0's Table 1, adapted for viruses.
 
-Run:  python -m viral_annotation.benchmark.run [--cutoff YYYYMMDD] [--min-count N]
+Run via the CLI:  va-benchmark [--cutoff YYYYMMDD] [--min-count N]
 """
 
 from __future__ import annotations
 
-import argparse
 import time
 
 from viral_annotation.config import (
@@ -38,7 +37,8 @@ from viral_annotation.evaluation.metrics import (
 )
 from viral_annotation.ontology import GoDag
 from viral_annotation.benchmark.temporal import build_temporal_split
-from viral_annotation.training.train import _auto_device, _train_head
+from viral_annotation.training.heads import fit_pooled_head
+from viral_annotation.training.pipeline import auto_device
 
 METHODS = ["Naive", "BLAST-KNN", "LR-ESM", "Ensemble"]
 NS_ABBR = {"molecular_function": "MFO", "biological_process": "BPO", "cellular_component": "CCO"}
@@ -55,7 +55,7 @@ def run(cutoff=20240101, model_key=DEFAULT_ESM_MODEL, min_count=3, epochs=300):
     t0 = time.time()
     torch.manual_seed(TRAIN_SEED)
     np.random.seed(TRAIN_SEED)
-    device = _auto_device(torch)
+    device = auto_device(torch)
     print(f"[1/4] device={device} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
 
@@ -96,9 +96,9 @@ def run(cutoff=20240101, model_key=DEFAULT_ESM_MODEL, min_count=3, epochs=300):
         Yte = build_labels(test_ns, vocab, "terms_manual")
 
         naive = np.tile(Ytr.mean(axis=0), (len(test_ns), 1))
-        lr_model, _, _ = _train_head(Xtr, Ytr, Xva, Yva, hidden_dims=None, epochs=epochs,
-                                     lr=TRAIN_LR, batch_size=TRAIN_BATCH_SIZE, device=device,
-                                     patience=TRAIN_EARLY_STOP_PATIENCE)
+        lr_model, _, _ = fit_pooled_head(Xtr, Ytr, Xva, Yva, hidden_dims=None, epochs=epochs,
+                                         lr=TRAIN_LR, batch_size=TRAIN_BATCH_SIZE, device=device,
+                                         patience=TRAIN_EARLY_STOP_PATIENCE)
         lr_te = predict_proba(lr_model, Xte)
         hom_te = homology_scores(test_ns, tr_ns, dag, vocab)
 
@@ -127,17 +127,3 @@ def _print_table(results):
                 v = results[m].get(ns)
                 cells.append(f"{v[idx]:7.3f}" if v else f"{'—':>7s}")
             print(f"  {m:12s} " + " ".join(cells))
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Virus-only NetGO-style temporal benchmark.")
-    ap.add_argument("--cutoff", type=int, default=20240101, help="YYYYMMDD train/test boundary")
-    ap.add_argument("--min-count", type=int, default=3)
-    ap.add_argument("--epochs", type=int, default=300)
-    args = ap.parse_args(argv)
-    run(cutoff=args.cutoff, min_count=args.min_count, epochs=args.epochs)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

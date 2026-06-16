@@ -1,7 +1,7 @@
 # Virus-only NetGO-3.0-style benchmark
 
 A faithful-as-possible replication of NetGO 3.0's benchmarking methodology, adapted
-for viruses. `python -m viral_annotation.benchmark.run [--cutoff YYYYMMDD] [--min-count N]`.
+for viruses. `va-benchmark [--cutoff YYYYMMDD] [--min-count N]`.
 
 ## Methodology (what we replicate)
 

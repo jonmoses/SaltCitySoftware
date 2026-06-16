@@ -1,0 +1,58 @@
+"""Shared data/orchestration helpers for training and benchmarking.
+
+The trainer (`training.train`) and the benchmark (`benchmark.run`) need the same
+front half — pick a device, fetch + label proteins, split them — so it lives here
+once instead of being copy-pasted. These helpers are quiet (no printing); the
+callers narrate their own progress.
+"""
+
+from __future__ import annotations
+
+from viral_annotation.config import HOLDOUT_FAMILY, UNIPROT_VIRAL_QUERY
+from viral_annotation.data import labels as labels_mod
+from viral_annotation.data.cluster import cluster_sequences
+from viral_annotation.data.split import cluster_split, split_proteins
+
+
+def auto_device(torch) -> str:
+    """Best available torch device: CUDA, then Apple MPS, then CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def annotation_stats(proteins) -> str:
+    """One-line summary of a protein set's manual/IEA annotation coverage."""
+    n_manual = sum(p.n_manual for p in proteins)
+    n_iea = sum(p.n_iea for p in proteins)
+    have_manual = sum(1 for p in proteins if p.has_manual)
+    pct = 100 * have_manual / max(len(proteins), 1)
+    return (f"{len(proteins)} proteins | manual-having {have_manual} ({pct:.1f}%) | "
+            f"raw annotations manual={n_manual} iea={n_iea}")
+
+
+def load_proteins(dag, limit: int | None = None, query: str = UNIPROT_VIRAL_QUERY) -> list:
+    """Fetch reviewed proteins from UniProt and propagate their GO labels.
+
+    `query` selects the pathogen domain (default the viral taxon); pass a domain
+    profile's `uniprot_query` for bacteria.
+    """
+    raw = list(labels_mod.fetch_raw(limit=limit, query=query))
+    return [p for p in labels_mod.label_proteins(raw, dag) if p.sequence]
+
+
+def make_split(proteins, *, use_cluster: bool = True, holdout_family: str | None = HOLDOUT_FAMILY,
+               family_suffixes: tuple[str, ...] = ("viridae",)):
+    """Split proteins into train/val/test (+ optional held-out family).
+
+    `use_cluster` uses the leakage-safe 30%-identity cluster split; otherwise a
+    plain random split (not leakage-safe — for quick checks only). `family_suffixes`
+    is the lineage-clade suffix that identifies the holdout family rank (viral
+    'viridae'; bacterial 'aceae').
+    """
+    if use_cluster:
+        return cluster_split(proteins, cluster_sequences(proteins),
+                             holdout_family=holdout_family, family_suffixes=family_suffixes)
+    return split_proteins(proteins)

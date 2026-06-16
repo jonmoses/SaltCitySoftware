@@ -32,13 +32,13 @@ def test_attn_pool_ignores_padding():
 
 
 def test_collate_pads_and_masks():
-    from viral_annotation.training.train_attn import _collate
+    from viral_annotation.training.heads import collate_residues
 
     batch = [
         (np.ones((2, 3), dtype="float32"), np.array([1, 0], dtype="float32")),
         (np.full((4, 3), 2.0, dtype="float32"), np.array([0, 1], dtype="float32")),
     ]
-    X, mask, Y = _collate(batch)
+    X, mask, Y = collate_residues(batch)
     assert tuple(X.shape) == (2, 4, 3)           # padded to the longest (4)
     assert mask.tolist() == [[1, 1, 0, 0], [1, 1, 1, 1]]
     assert tuple(Y.shape) == (2, 2)

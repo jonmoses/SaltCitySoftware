@@ -42,10 +42,13 @@ class Split:
         return s
 
 
-def family_of(lineage) -> str | None:
-    """The ICTV family rank from a UniProt lineage — first clade ending 'viridae'."""
+def family_of(lineage, suffixes: tuple[str, ...] = ("viridae",)) -> str | None:
+    """The family-rank clade from a UniProt lineage — first clade ending in one of
+    `suffixes`. Default 'viridae' is the viral ICTV family rank; bacteria use
+    'aceae' (LPSN/NCBI). `str.endswith` takes the suffix tuple directly."""
+    low = tuple(s.lower() for s in suffixes)
     for clade in lineage:
-        if clade.lower().endswith("viridae"):
+        if clade.lower().endswith(low):
             return clade
     return None
 
@@ -81,6 +84,7 @@ def cluster_split(
     holdout_family: str | None = None,
     ratios: tuple[float, float, float] = SPLIT_RATIOS,
     seed: int = SPLIT_SEED,
+    family_suffixes: tuple[str, ...] = ("viridae",),
 ) -> Split:
     """Identity-cluster split with optional whole-family holdout (docs/03).
 
@@ -100,7 +104,7 @@ def cluster_split(
     holdout = []
     pool = []
     for p in proteins:
-        if holdout_family and family_of(p.lineage) == holdout_family:
+        if holdout_family and family_of(p.lineage, family_suffixes) == holdout_family:
             if p.has_manual:
                 holdout.append(p)
         else:
