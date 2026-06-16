@@ -20,10 +20,16 @@ from viral_annotation.config import (
 )
 
 
-def cache_path(model_key: str, pooling: str, repr_layer: int | None) -> Path:
-    """Deterministic cache filename for a feature config."""
+def cache_path(model_key: str, pooling: str, repr_layer: int | None,
+               window: bool = False) -> Path:
+    """Deterministic cache filename for a feature config.
+
+    Windowed embeddings get their own file so they never collide with truncated
+    ones (and so the two can be A/B compared).
+    """
     layer = "last" if repr_layer is None else str(repr_layer)
-    return EMBEDDINGS_CACHE / f"esm2_{model_key}_{pooling}_layer-{layer}.npz"
+    suffix = "_win" if window else ""
+    return EMBEDDINGS_CACHE / f"esm2_{model_key}_{pooling}_layer-{layer}{suffix}.npz"
 
 
 def _load_existing(path: Path):
@@ -42,6 +48,7 @@ def embed_records(
     model_key: str = DEFAULT_ESM_MODEL,
     pooling: str = DEFAULT_POOLING,
     repr_layer: int | None = None,
+    window: bool = False,
     batch_size: int | None = None,
     embedder=None,
 ):
@@ -49,8 +56,9 @@ def embed_records(
 
     Args:
         records: iterable of objects with `.accession` and `.sequence`.
-        embedder: optional prebuilt ESMEmbedder (else one is built lazily, and
-                  only if there is something to compute).
+        window: use windowed embeddings (own cache; short proteins are seeded
+                from the truncated cache since their embedding is identical).
+        embedder: optional prebuilt ESMEmbedder (its `window` wins if provided).
 
     Returns:
         ids: list[str] of accessions in input order.
@@ -59,8 +67,23 @@ def embed_records(
     import numpy as np
 
     records = list(records)
-    path = cache_path(model_key, pooling, repr_layer)
+    if embedder is not None:
+        window = embedder.window
+    max_len = embedder.max_length if embedder is not None else 1022
+    path = cache_path(model_key, pooling, repr_layer, window)
     cached, _ = _load_existing(path)
+    n_loaded = len(cached)
+
+    # For windowing, a protein no longer than one window embeds identically to the
+    # truncated version, so seed those from the truncated cache instead of
+    # recomputing — only genuinely long proteins need the windowed forward pass.
+    if window:
+        trunc, _ = _load_existing(cache_path(model_key, pooling, repr_layer, window=False))
+        if trunc:
+            for r in records:
+                if (r.accession not in cached and len(r.sequence) <= max_len
+                        and r.accession in trunc):
+                    cached[r.accession] = trunc[r.accession]
 
     missing = [r for r in records if r.accession not in cached]
     if missing:
@@ -68,7 +91,7 @@ def embed_records(
             from viral_annotation.embeddings.esm import ESMEmbedder
 
             embedder = ESMEmbedder(
-                model_key=model_key, pooling=pooling, repr_layer=repr_layer
+                model_key=model_key, pooling=pooling, repr_layer=repr_layer, window=window
             )
         # embed() handles length-sorting, token-budget batching, and preserves
         # input order. Process in chunks and persist after each so a long run
@@ -83,6 +106,9 @@ def embed_records(
             _save(path, cached)
             print(f"       embedded {min(c + chunk, len(missing))}/{len(missing)} new "
                   f"(cache {len(cached)})", flush=True)
+    elif len(cached) != n_loaded:
+        # Seeded short proteins but computed nothing — persist the seeded cache.
+        _save(path, cached)
 
     ids = [r.accession for r in records]
     X = np.stack([cached[a] for a in ids]).astype("float32")

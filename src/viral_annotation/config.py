@@ -113,6 +113,7 @@ TRAIN_EPOCHS = 100
 TRAIN_BATCH_SIZE = 256
 TRAIN_EARLY_STOP_PATIENCE = 10   # epochs without val-Fmax improvement
 POS_WEIGHT_CLAMP = 100.0         # cap per-term BCE pos_weight to avoid blow-ups
+TRAIN_SEED = 1337                # seed weight init + minibatch shuffle for reproducible runs
 
 # Where trained artifacts land (state_dict + term index + run config).
 MODELS_DIR = REPO_ROOT / "models"

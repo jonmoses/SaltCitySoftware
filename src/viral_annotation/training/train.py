@@ -37,6 +37,7 @@ from viral_annotation.config import (
     TRAIN_EARLY_STOP_PATIENCE,
     TRAIN_EPOCHS,
     TRAIN_LR,
+    TRAIN_SEED,
     TRAIN_WEIGHT_DECAY,
 )
 from viral_annotation.classifier.model import build_classifier, predict_proba
@@ -129,12 +130,17 @@ def run(
     batch_size: int = TRAIN_BATCH_SIZE,
     use_cluster: bool = True,
     holdout_family: str | None = HOLDOUT_FAMILY,
+    window: bool = True,
     save: bool = True,
 ):
     import numpy as np
     import torch
 
     t0 = time.time()
+    # Seed weight init + minibatch shuffle so runs are reproducible and windowed-
+    # vs-truncated (and other) A/Bs aren't swamped by training noise.
+    torch.manual_seed(TRAIN_SEED)
+    np.random.seed(TRAIN_SEED)
     device = _auto_device(torch)
     print(f"[1/5] device={device} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
@@ -162,8 +168,10 @@ def run(
     # this is instant on re-runs (no ESM forward passes).
     from viral_annotation.embeddings.esm import ESMEmbedder
 
-    embedder = ESMEmbedder(model_key=model_key, pooling=pooling, repr_layer=repr_layer)
-    print(f"[4/5] embedding ({model_key}, {pooling}) — cached where possible …")
+    embedder = ESMEmbedder(model_key=model_key, pooling=pooling, repr_layer=repr_layer,
+                           window=window)
+    print(f"[4/5] embedding ({model_key}, {pooling}, "
+          f"{'windowed' if window else 'truncated'}) — cached where possible …")
     pool_prots = {"all": split.train, "manual_having": manual_train}
     pool_X = {
         name: embed_records(prots, model_key, pooling, repr_layer, embedder=embedder)[1]
@@ -177,7 +185,7 @@ def run(
     arch = "linear" if not hidden_dims else hidden_dims
     print(f"[5/5] training per-namespace heads (arch={arch}) …")
     heads: dict[str, dict] = {}
-    combo_prob, combo_true = [], []
+    combo_prob, combo_true, combo_naive = [], [], []
     for ns in GO_NAMESPACES:
         pol = NAMESPACE_POLICY[ns]
         train_prots = pool_prots[pol["train_pool"]]
@@ -197,48 +205,67 @@ def run(
         )
         prob_te = apply_hierarchical_correction(predict_proba(model, Xte), vocab, dag)
         res = fmax_matrix(prob_te, Yte)
+
+        # Naive baseline: every protein gets the per-term training frequency
+        # (the prior). The floor a real model must clear. Already hierarchically
+        # consistent (parent freq >= child freq after propagation).
+        prior = Ytr.mean(axis=0)
+        naive_te = np.tile(prior, (Yte.shape[0], 1))
+        naive_res = fmax_matrix(naive_te, Yte)
+
         heads[ns] = {"vocab": vocab, "model": model, "state": model.state_dict(),
-                     "policy": pol, "result": res}
+                     "policy": pol, "result": res, "naive": naive_res, "prior": prior}
         combo_prob.append(prob_te)
         combo_true.append(Yte)
+        combo_naive.append(naive_te)
         print(f"       {NS_SHORT[ns]}: N={len(vocab):4d} pool={pol['train_pool']:13s} "
               f"train={pol['train_field']:12s} -> Fmax={res.fmax:.4f} "
+              f"(naive {naive_res.fmax:.4f}) "
               f"(P={res.precision:.3f} R={res.recall:.3f} tau={res.threshold:.2f}) "
               f"val={vbest:.3f} epochs={ep}")
 
     # Overall: namespaces own disjoint term sets, so concatenate columns.
-    overall = fmax_matrix(np.concatenate(combo_prob, axis=1), np.concatenate(combo_true, axis=1))
+    combo_true_cat = np.concatenate(combo_true, axis=1)
+    overall = fmax_matrix(np.concatenate(combo_prob, axis=1), combo_true_cat)
+    naive_overall = fmax_matrix(np.concatenate(combo_naive, axis=1), combo_true_cat)
 
     print("\n=== TEST (manual-only labels, hierarchically corrected) ===")
+    print(f"  {'namespace':20s} {'Fmax':>7s}  {'naive':>6s}  {'lift':>6s}")
     for ns in GO_NAMESPACES:
         if ns in heads:
-            r = heads[ns]["result"]
-            print(f"  {ns:20s} Fmax={r.fmax:.4f}  P={r.precision:.3f}  R={r.recall:.3f}  (N={r.n_terms})")
-    print(f"  {'overall':20s} Fmax={overall.fmax:.4f}  P={overall.precision:.3f}  "
-          f"R={overall.recall:.3f}  (N={overall.n_terms})")
+            r, nv = heads[ns]["result"], heads[ns]["naive"]
+            print(f"  {ns:20s} {r.fmax:7.4f}  {nv.fmax:6.4f}  {r.fmax - nv.fmax:+6.4f}  "
+                  f"(P={r.precision:.3f} R={r.recall:.3f} N={r.n_terms})")
+    print(f"  {'overall':20s} {overall.fmax:7.4f}  {naive_overall.fmax:6.4f}  "
+          f"{overall.fmax - naive_overall.fmax:+6.4f}  (N={overall.n_terms})")
 
     # Zero-shot: recover the held-out family's known functions with the SAME heads.
     zeroshot = None
     if split.holdout and Xho is not None:
-        zprob, ztrue = [], []
+        zprob, ztrue, znaive = [], [], []
         for ns in GO_NAMESPACES:
             if ns not in heads:
                 continue
             h = heads[ns]
             p = apply_hierarchical_correction(predict_proba(h["model"], Xho), h["vocab"], dag)
             y = build_labels(split.holdout, h["vocab"], "terms_manual")
+            nv = np.tile(h["prior"], (y.shape[0], 1))   # naive = training prior
             heads[ns]["zeroshot"] = fmax_matrix(p, y)
-            zprob.append(p)
-            ztrue.append(y)
-        zeroshot = fmax_matrix(np.concatenate(zprob, axis=1), np.concatenate(ztrue, axis=1))
+            heads[ns]["zeroshot_naive"] = fmax_matrix(nv, y)
+            zprob.append(p); ztrue.append(y); znaive.append(nv)
+        ztrue_cat = np.concatenate(ztrue, axis=1)
+        zeroshot = fmax_matrix(np.concatenate(zprob, axis=1), ztrue_cat)
+        z_naive = fmax_matrix(np.concatenate(znaive, axis=1), ztrue_cat)
         print(f"\n=== ZERO-SHOT — held-out {holdout_family} "
               f"({len(split.holdout)} manual-having proteins, never trained on) ===")
+        print(f"  {'namespace':20s} {'Fmax':>7s}  {'naive':>6s}  {'lift':>6s}")
         for ns in GO_NAMESPACES:
             if ns in heads and "zeroshot" in heads[ns]:
-                z = heads[ns]["zeroshot"]
-                print(f"  {ns:20s} Fmax={z.fmax:.4f}  P={z.precision:.3f}  R={z.recall:.3f}  (N={z.n_terms})")
-        print(f"  {'overall':20s} Fmax={zeroshot.fmax:.4f}  P={zeroshot.precision:.3f}  "
-              f"R={zeroshot.recall:.3f}  (N={zeroshot.n_terms})")
+                z, zn = heads[ns]["zeroshot"], heads[ns]["zeroshot_naive"]
+                print(f"  {ns:20s} {z.fmax:7.4f}  {zn.fmax:6.4f}  {z.fmax - zn.fmax:+6.4f}  "
+                      f"(P={z.precision:.3f} R={z.recall:.3f} N={z.n_terms})")
+        print(f"  {'overall':20s} {zeroshot.fmax:7.4f}  {z_naive.fmax:6.4f}  "
+              f"{zeroshot.fmax - z_naive.fmax:+6.4f}  (N={zeroshot.n_terms})")
 
     print(f"\n[done] elapsed {time.time() - t0:.1f}s")
 
@@ -265,6 +292,7 @@ def _save_models(heads, overall, model_key, pooling, repr_layer, hidden_dims):
             ns: {
                 "policy": heads[ns]["policy"],
                 "fmax": heads[ns]["result"].fmax,
+                "naive_fmax": heads[ns]["naive"].fmax,
                 "terms": heads[ns]["vocab"].terms,
             }
             for ns in heads
@@ -278,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Train the viral GO classifier (per-namespace).")
     ap.add_argument("--limit", type=int, default=None, help="cap proteins fetched (dry run)")
     ap.add_argument("--model", dest="model_key", default=DEFAULT_ESM_MODEL)
+    ap.add_argument("--pooling", default=DEFAULT_POOLING, choices=["mean", "cls", "stats"],
+                    help="residue pooling: mean|cls (d) or stats=mean|max|min|std (4d)")
     ap.add_argument("--min-count", type=int, default=MIN_TERM_COUNT)
     ap.add_argument("--epochs", type=int, default=TRAIN_EPOCHS)
     ap.add_argument("--lr", type=float, default=TRAIN_LR)
@@ -288,14 +318,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="use the old random split instead of the 30%% identity cluster split")
     ap.add_argument("--holdout-family", default=HOLDOUT_FAMILY,
                     help="viral family held out for zero-shot eval (empty string to disable)")
+    ap.add_argument("--truncate", action="store_true",
+                    help="truncate long proteins to the cap instead of windowing them")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
 
     run(
-        limit=args.limit, model_key=args.model_key, min_count=args.min_count,
+        limit=args.limit, model_key=args.model_key, pooling=args.pooling,
+        min_count=args.min_count,
         hidden_dims=args.hidden, epochs=args.epochs, lr=args.lr,
         batch_size=args.batch_size, use_cluster=not args.random_split,
-        holdout_family=args.holdout_family or None, save=not args.no_save,
+        holdout_family=args.holdout_family or None, window=not args.truncate,
+        save=not args.no_save,
     )
     return 0
 

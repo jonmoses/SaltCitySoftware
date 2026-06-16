@@ -46,20 +46,37 @@ Linear heads on ESM-2 650M, **per-namespace evidence policy**, manual-only test
 labels, hierarchically corrected, **30%-identity cluster split** (MMseqs2) with
 **Coronaviridae held out** for zero-shot.
 
+Every number is reported against a **Naive baseline** (predict each term's training
+frequency) — the floor a real model must clear. `lift` = model − naive.
+
 **In-distribution test (leakage-safe cluster split):**
 
-| Namespace | N terms | Policy | Fmax |
-|-----------|---------|--------|------|
-| Molecular Function | 45  | manual-only (manual-having pool) | 0.168 |
-| Biological Process | 545 | asymmetric (train manual+IEA)    | 0.355 |
-| Cellular Component | 105 | asymmetric (train manual+IEA)    | 0.256 |
-| **overall**        | 695 | —                                | **0.387** |
+| Namespace | N | Policy | Fmax | naive | lift |
+|-----------|---|--------|------|-------|------|
+| Molecular Function | 45  | manual-only      | 0.153 | 0.135 | +0.02 |
+| Biological Process | 545 | asymmetric       | 0.344 | 0.293 | +0.05 |
+| Cellular Component | 105 | asymmetric       | 0.251 | 0.205 | +0.05 |
+| **overall**        | 695 | —                | **0.376** | 0.293 | **+0.08** |
+
+In-distribution the model beats the prior by a clear margin (overall +0.08),
+driven by BP/CC; **MF barely clears naive** (+0.02) — viral molecular function is
+hard (manual-MF ≈ protein binding, closer to the PPI problem; see `docs/01`).
 
 **Zero-shot — held-out Coronaviridae (69 proteins, never trained on):**
 
-| MF | BP | CC | overall |
-|----|----|----|---------|
-| 0.417 | 0.193 | 0.273 | **0.281** |
+| Namespace | Fmax | naive | lift |
+|-----------|------|-------|------|
+| Molecular Function | 0.249 | 0.344 | −0.09 |
+| Biological Process | 0.204 | 0.192 | +0.01 |
+| Cellular Component | 0.276 | 0.321 | −0.05 |
+| **overall**        | **0.257** | 0.287 | **−0.03** |
+
+**Honest caveat:** against the Naive baseline the model does **not** yet beat the
+prior zero-shot (overall −0.04). Coronaviruses are enriched for common, predictable
+functions, so the prior is strong; recovering an unseen family's function *better
+than base rates* is unsolved here and is real future work — not the win an earlier
+draft of this README claimed. (Adding a homology/InterPro ensemble component is the
+likely lever; see the NetGO 3.0 lessons.)
 
 **Why per-namespace:** a joint head trained on IEA-dominated labels collapsed MF
 to 0.09 — viral IEA-MF (domain-rule ligand binding) is nearly disjoint from
@@ -69,9 +86,9 @@ heads also lifted BP/CC. See `docs/01` + project memory.
 **Rigorous separation:** whole 30%-identity clusters go to one split bucket, so no
 test protein has a close homolog in train (the cluster split dropped ~1,570 IEA
 homologs of val/test proteins that a random split would have leaked into train).
-Coronaviridae is held out entirely, then scored on recovering its known functions —
-satisfying the SBIR's data-separation + zero-shot requirements. Embeddings are
-cached, so a full re-run (cluster + train + zero-shot) is ~90s.
+Coronaviridae is held out entirely. Long proteins (>1022 aa, 7.8% of the set) are
+embedded by **non-overlapping windows + length-weighted pooling** rather than
+truncated. Runs are seeded; embeddings are cached, so a full re-run is ~90s.
 
 ## Setup
 
