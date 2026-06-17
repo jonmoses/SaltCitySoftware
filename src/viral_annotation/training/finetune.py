@@ -182,6 +182,8 @@ def fit_finetune(model, tokenizer, train_prots, val_prots, vocabs, policy, devic
 
     Returns (val_fmax_by_ns, epochs_run). `model` is left holding the best weights.
     """
+    import time
+
     import numpy as np
     import torch
     from torch.utils.data import DataLoader, Dataset
@@ -210,6 +212,11 @@ def fit_finetune(model, tokenizer, train_prots, val_prots, vocabs, policy, devic
         return enc, ys, ms
 
     loader = DataLoader(_Idx(), batch_size=hp.ft_batch, shuffle=True, collate_fn=collate)
+    n_steps = len(loader)
+    log_every = max(1, n_steps // 50)   # ~50 progress lines per epoch
+    print(f"      fit: {len(seqs)} train proteins | {n_steps} steps/epoch "
+          f"(batch {hp.ft_batch}, grad_accum {hp.ft_grad_accum}) | {hp.ft_epochs} epochs max",
+          flush=True)
 
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     head_params = list(model.heads.parameters()) + list(model.attn.parameters())
@@ -225,6 +232,7 @@ def fit_finetune(model, tokenizer, train_prots, val_prots, vocabs, policy, devic
         model.train()
         optimizer.zero_grad()
         pending = False
+        t0 = time.time()
         for step, (enc, ys, ms) in enumerate(loader):
             enc = {k: v.to(device) for k, v in enc.items()}
             with _autocast(device, torch):
@@ -240,12 +248,21 @@ def fit_finetune(model, tokenizer, train_prots, val_prots, vocabs, policy, devic
             if (step + 1) % accum == 0:
                 scaler.step(optimizer); scaler.update(); optimizer.zero_grad()
                 pending = False
+            if step % log_every == 0:
+                rate = (step + 1) / max(time.time() - t0, 1e-6)
+                eta_min = (n_steps - step - 1) / max(rate, 1e-6) / 60
+                print(f"      epoch {epoch}/{hp.ft_epochs} step {step + 1}/{n_steps} "
+                      f"| loss {float(loss.detach()):.4f} | {rate:.2f} it/s | ETA {eta_min:.0f}m",
+                      flush=True)
         if pending:
             scaler.step(optimizer); scaler.update(); optimizer.zero_grad()
 
         probs = _predict_all(model, val_prots, tokenizer, device, hp.max_length, hp.ft_batch)
         fmax = {ns: fmax_matrix(probs[ns], Yval[ns]).fmax for ns in namespaces}
         score = float(np.mean(list(fmax.values()))) if fmax else 0.0
+        print(f"      epoch {epoch}/{hp.ft_epochs} done in {(time.time() - t0) / 60:.1f}m | "
+              f"val Fmax {{{', '.join(f'{k}={v:.3f}' for k, v in fmax.items())}}} | "
+              f"mean {score:.3f}", flush=True)
         if score > best + 1e-4:
             best, best_fmax, wait = score, fmax, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
