@@ -166,7 +166,15 @@ class ESMEmbedder:
         layer is materialized; GPU buffers are freed after each yield resumes.
         """
         self._ensure_loaded()
+        import contextlib
+
         import torch
+
+        # On CUDA, run the (heavy) transformer forward under fp16 autocast so T4-class
+        # tensor cores are used — typically 5-10x faster than fp32 with no meaningful
+        # effect on pooled features. No-op on CPU/MPS (keeps those paths bit-identical).
+        amp = (torch.autocast(device_type="cuda", dtype=torch.float16)
+               if self._device == "cuda" else contextlib.nullcontext())
 
         seqs = [s[: self.max_length] for s in sequences]
         order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))
@@ -191,13 +199,13 @@ class ESMEmbedder:
                 truncation=True, max_length=self.max_length + 2,
             ).to(self._device)
             want_layers = self.repr_layer is not None
-            with torch.no_grad():
+            with torch.no_grad(), amp:
                 result = self._model(**enc, output_hidden_states=want_layers)
             hidden = (
                 result.hidden_states[self.repr_layer]
                 if want_layers
                 else result.last_hidden_state
-            )  # [B, L, d]
+            ).float()  # [B, L, d] -> fp32 for stable pooling (heavy forward ran in fp16)
             yield idx, hidden, enc["attention_mask"]
             del result, hidden, enc
             if self._device == "mps":
