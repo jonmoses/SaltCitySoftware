@@ -33,6 +33,7 @@ is the other major pillar and is summarized but not the current build target.
 | `05-references.md`                | Annotated bibliography with URLs |
 | `06-benchmark.md`                 | Virus-only NetGO-3.0-style temporal benchmark (methodology + result) |
 | `07-threat-characterization.md`   | Stage-3 demo: annotate a virus → danger-category threat profile |
+| `08-bacterial-extension.md`       | Extending the pipeline to bacteria: per-domain profiles, bacterial danger ontology, re-validation |
 | `glossary.md`                     | Domain term definitions |
 
 ## Status

@@ -44,6 +44,7 @@ sequence (FASTA)
 | `data.proteomes` — fetch a target virus proteome (TrEMBL incl.) by taxon | **Working** |
 | `threat` / `data.danger_terms` — map predicted GO → danger categories | **Working, tested** |
 | `cli.threat` — **Stage 3 demo**: annotate a virus → threat profile | **Working** (`[ml]`); `va-threat --panel`; see `docs/07-threat-characterization.md` |
+| `config.PathogenDomain` — per-domain profiles (viral/bacterial): taxon, family holdout, evidence/pooling policy, danger ontology, target panel, models dir | **Working**; `va-train --domain bacterial`, `va-threat --domain bacterial`; bacterial model not yet trained; see `docs/08-bacterial-extension.md` |
 | localization / enrichment | Planned — see `docs/01-annotation-pipeline-design.md` |
 
 ### GO classifier — full-set result (17,517 viral reviewed proteins)
