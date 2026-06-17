@@ -18,6 +18,8 @@ import argparse
 from viral_annotation.config import (
     DEFAULT_DOMAIN,
     DOMAINS,
+    FT_GRAD_ACCUM,
+    FT_MAX_LENGTH,
     TRAIN_BATCH_SIZE,
     TRAIN_EPOCHS,
     TRAIN_LR,
@@ -51,6 +53,18 @@ def main(argv=None) -> int:
     ap.add_argument("--records", default=None,
                     help="path to a cached RawProtein JSONL (from labels.save_raw) to load "
                          "instead of fetching UniProt — must match --domain; skips the fetch")
+    ap.add_argument("--finetune", choices=["none", "lora"], default="none",
+                    help="'lora' end-to-end fine-tunes the ESM backbone (adapters) + heads; "
+                         "default 'none' trains heads on frozen embeddings")
+    ap.add_argument("--loss", choices=["bce", "asl"], default="bce",
+                    help="multi-label loss: 'bce' (pos-weighted, default) or 'asl' (asymmetric)")
+    ap.add_argument("--max-length", type=int, default=FT_MAX_LENGTH,
+                    help="sequence truncation length for the LoRA fine-tune path")
+    ap.add_argument("--grad-accum", type=int, default=FT_GRAD_ACCUM,
+                    help="gradient-accumulation steps for the LoRA fine-tune path")
+    ap.add_argument("--train-pool-cap", type=int, default=None,
+                    help="cap the fine-tune train pool (keeps all manual-having + sampled "
+                         "IEA) to bound GPU time on large corpora")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
 
@@ -66,7 +80,9 @@ def main(argv=None) -> int:
         ensemble=args.ensemble, min_count=args.min_count, hidden_dims=args.hidden,
         epochs=args.epochs, lr=args.lr, batch_size=args.batch_size,
         use_cluster=not args.random_split, holdout_family=holdout, save=not args.no_save,
-        records_path=args.records)
+        records_path=args.records, finetune=args.finetune, loss=args.loss,
+        max_length=args.max_length, grad_accum=args.grad_accum,
+        train_pool_cap=args.train_pool_cap)
     return 0
 
 

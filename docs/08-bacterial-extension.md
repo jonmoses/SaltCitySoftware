@@ -18,9 +18,9 @@ unchanged** (its model still lives at `models/go_classifier.pt`).
 | `taxon_id` / `uniprot_query` | 10239 | **2** |
 | `family_suffixes` (holdout rank) | `viridae` | **`aceae`** |
 | `holdout_family` (zero-shot) | Coronaviridae | **Francisellaceae** |
-| `namespace_policy` | MF manual-only, attn MF | **all asymmetric, all mean** (see below) |
-| `min_term_count` | 10 | **25** (≈20× larger corpus) |
-| `default_pooling` | mean | **mean** |
+| `namespace_policy` | MF manual-only, attn MF | **all asymmetric; attn MF, mean BP/CC** (see below) |
+| `min_term_count` | 10 | **15** (larger corpus) |
+| `default_pooling` | mean | **mean** (the servable model; LoRA path uses the policy) |
 | `models_subdir` | `""` (root) | **`bacterial/`** |
 
 **Reused unchanged:** ESM embedding + caches (`embeddings/`), classifier heads +
@@ -68,14 +68,43 @@ Two empirical viral findings were virus-specific and must be re-derived for bact
    policy **starts asymmetric (manual+IEA) for all three namespaces** and is only
    specialized if the IEA-vs-manual MF diagnostic shows the same collapse. The
    bacterial `NAMESPACE_POLICY` is an *output* of that run, not an assumption.
-2. **Pooling.** Bacterial defaults to **mean** — it is the servable config and the
-   learned-attention per-residue cache (~hundreds of GB at bacterial scale) is
-   impractical. Re-test attention-for-MF later.
+2. **Pooling.** The plain `va-train --domain bacterial` model defaults to **mean** —
+   the servable config, and a *frozen* attention per-residue cache (~hundreds of GB at
+   bacterial scale) is impractical. Attention-for-MF is instead reached through the
+   end-to-end **LoRA fine-tune** path (below), where residues are computed live and
+   never cached.
+
+## Architecture: LoRA fine-tune (beyond the frozen linear head)
+
+The frozen pLM + linear head tops out around **overall Fmax 0.49** (MF 0.48 / BP 0.45 /
+CC 0.57) — only ~0.10–0.15 over Naive. The backbone never adapts to bacterial sequence
+statistics, and mean pooling dilutes the localized motifs that determine function. The
+`--finetune lora` mode (`training/finetune.py`) unfreezes ESM-2 650M with **low-rank
+adapters** and trains it jointly with the per-namespace pooling + heads:
+
+- **One shared backbone, three per-namespace heads (multi-task).** A single backbone
+  forward yields hidden states `[B,L,d]` that feed an **attention pooler for MF** and a
+  **mean pool for BP/CC** — far cheaper than three separate fine-tunes, and it fits a
+  Kaggle T4 (adapters-only params + gradient checkpointing + fp16).
+- **Per-namespace evidence policy preserved by masking,** not by splitting the backbone:
+  each protein contributes loss to a namespace only if it is in that namespace's
+  `train_pool` (so MF can stay manual-only while BP/CC train manual+IEA). Val/test still
+  score manual-only, exactly as the frozen path.
+- **No per-residue disk cache** — residues are computed live and back-propagated.
+- **Asymmetric multi-label loss** (`--loss asl`) replaces the crude clamped `pos_weight`,
+  and the heads gain LayerNorm/GELU/dropout (`build_classifier` flags).
+- **Serving is heavier:** a LoRA model loads ESM-2 + the adapter via
+  `serving.FinetunedAnnotator` (not the lightweight `GoAnnotator`); artifacts land in
+  `models/bacterial/finetuned/` (adapter + `heads.pt` + meta).
+
+The frozen path is unchanged and remains the default; this is a `--finetune lora` knob on
+the one trainer, validated against the same Fmax-vs-Naive tables.
 
 ## Scale (all reviewed bacterial Swiss-Prot, ~20× viral)
 
-- Embedding is a long one-time job; the pooled cache checkpoints per chunk. The
-  per-residue (attention) cache is impractical here → mean pooling.
+- Embedding is a long one-time job; the pooled cache checkpoints per chunk. A *frozen*
+  per-residue (attention) cache is impractical here → mean pooling for the servable
+  model; the LoRA path avoids the cache entirely by computing residues live.
 - MMseqs2 clustering scales fine. Model-organism over-representation (E. coli, B.
   subtilis) is partly handled by the cluster split removing near-duplicates; per-cluster
   subsampling is a future option.
@@ -88,9 +117,14 @@ Two empirical viral findings were virus-specific and must be re-derived for bact
 ## Running it
 
 ```bash
-# Train the bacterial model (writes models/bacterial/go_classifier.pt[.meta.json]).
+# Frozen baseline (writes models/bacterial/go_classifier.pt[.meta.json]).
 va-train --domain bacterial --limit 2000      # dry run first (subset)
 va-train --domain bacterial                    # full reviewed bacterial set
+
+# LoRA fine-tune — the higher-accuracy architecture (writes models/bacterial/finetuned/).
+# --train-pool-cap bounds the manual+IEA pool to fit a single Kaggle T4 session.
+va-train --domain bacterial --finetune lora --loss asl --pooling per-namespace \
+         --train-pool-cap 100000
 
 # Threat-triage a bacterial proteome.
 va-threat --domain bacterial --panel           # anthrax / plague / tularemia / melioidosis
@@ -100,11 +134,12 @@ va-threat --domain bacterial --taxon 632 --name plague
 ## Status
 
 **Infrastructure complete and tested** (`tests/test_bacterial_domain.py`,
-`tests/test_training_refactor.py`; the viral path is unchanged and still passes). The
-bacterial **model is not yet trained**, so there are no bacterial result tables here
-yet — training the full reviewed bacterial set + running the evidence-policy diagnostic
-is the next step, after which this doc gets its per-namespace Fmax-vs-Naive and panel
-tables (as `docs/06`/`docs/07` have for viruses).
+`tests/test_training_refactor.py`, `tests/test_finetune.py`; the viral path is unchanged
+and still passes). Both the frozen baseline (~Fmax 0.49) and the new **LoRA fine-tune**
+path are wired into the one trainer. The fine-tuned model still needs a full Kaggle-T4
+run (`notebooks/kaggle_bacterial_train.ipynb`), after which this doc gets its
+per-namespace Fmax-vs-Naive and panel tables (as `docs/06`/`docs/07` have for viruses)
+and the frozen-vs-fine-tuned comparison + evidence-policy diagnostic.
 
 ## Out of scope (this iteration)
 

@@ -120,6 +120,28 @@ TRAIN_EARLY_STOP_PATIENCE = 10   # epochs without val-Fmax improvement
 POS_WEIGHT_CLAMP = 100.0         # cap per-term BCE pos_weight to avoid blow-ups
 TRAIN_SEED = 1337                # seed weight init + minibatch shuffle for reproducible runs
 
+# --- LoRA end-to-end fine-tuning (--finetune lora) --------------------------
+# Unfreezes the ESM-2 backbone with low-rank adapters and trains it jointly with
+# the per-namespace pooling + heads (training/finetune.py). The frozen-embedding
+# path above is unchanged and remains the default. Tuned to fit a Kaggle T4 (16 GB,
+# 12 h): adapters-only params + gradient checkpointing + fp16 keep memory low; the
+# backbone gets a much smaller lr than the freshly-initialised heads.
+FT_LORA_R = 16                   # LoRA rank
+FT_LORA_ALPHA = 32               # LoRA scaling (alpha/r = 2)
+FT_LORA_DROPOUT = 0.05
+FT_LORA_TARGETS = ("query", "key", "value", "dense")  # ESM-2 attention/FFN projections
+FT_BACKBONE_LR = 2e-4            # adapter learning rate
+FT_HEAD_LR = 1e-3                # head/pooler learning rate (matches TRAIN_LR)
+FT_EPOCHS = 4                    # passes over the (optionally capped) train pool
+FT_BATCH_SIZE = 8               # per-step sequences (length<=FT_MAX_LENGTH)
+FT_GRAD_ACCUM = 4                # effective batch = FT_BATCH_SIZE * FT_GRAD_ACCUM
+FT_MAX_LENGTH = 512              # truncate sequences for training (bacterial mean ~300 aa)
+FT_HIDDEN_DIMS = (512,)          # MLP head width for the fine-tune path
+FT_DROPOUT = 0.2                 # head dropout
+FT_ASL_GAMMA_NEG = 4.0           # asymmetric-loss focusing on negatives
+FT_ASL_GAMMA_POS = 1.0
+FT_ASL_CLIP = 0.05               # probability-shift for easy negatives
+
 # Where trained artifacts land (state_dict + term index + run config).
 MODELS_DIR = REPO_ROOT / "models"
 
@@ -164,20 +186,31 @@ DEFAULT_POOLING = "mean"
 # trained and served PER DOMAIN (separate heads + vocab), selected by taxonomy.
 
 # Bacteria. Taxonomy 2 = Bacteria. The bacterial set is ~20x the viral one, so:
-#   * pooling defaults to "mean" — the servable config, and the learned-attention
-#     per-residue cache (~hundreds of GB at this scale) is impractical here;
 #   * the term-frequency floor is raised (bigger corpus -> larger vocab otherwise);
 #   * the evidence policy starts ASYMMETRIC for all three namespaces (train on
 #     manual+IEA). Bacterial IEA is rich and reliable (orthology + curated domain
 #     rules), so the viral MF-manual-only fix is NOT assumed to carry over — it is
 #     re-derived by re-running the IEA-vs-manual MF diagnostic and only then
 #     specialized if MF collapses. See docs/08-bacterial-extension.md.
+#   * pooling: MF uses learned ATTENTION (localized catalytic/binding signal),
+#     BP/CC use mean. With the default mean-only servable model the attention
+#     per-residue cache is impractical (~hundreds of GB), so attention MF is
+#     reached via the end-to-end `--finetune lora` path (training/finetune.py),
+#     where residues are computed live and never cached. `default_pooling="mean"`
+#     keeps the plain `va-train --domain bacterial` run servable & mean-only.
 BACTERIAL_NAMESPACE_POLICY = {
-    ns: {
+    "molecular_function": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "attention",
+    },
+    "biological_process": {
         "train_pool": "all", "train_field": "terms_all",
         "vocab_field": "terms_all", "pooling": "mean",
-    }
-    for ns in GO_NAMESPACES
+    },
+    "cellular_component": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
+    },
 }
 
 

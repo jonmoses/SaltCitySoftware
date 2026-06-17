@@ -34,6 +34,14 @@ from types import SimpleNamespace
 from viral_annotation.config import (
     DEFAULT_DOMAIN,
     ESM2_MODELS,
+    FT_BACKBONE_LR,
+    FT_BATCH_SIZE,
+    FT_DROPOUT,
+    FT_EPOCHS,
+    FT_GRAD_ACCUM,
+    FT_HEAD_LR,
+    FT_HIDDEN_DIMS,
+    FT_MAX_LENGTH,
     GO_NAMESPACES,
     GO_OBO_PATH,
     TRAIN_BATCH_SIZE,
@@ -72,7 +80,8 @@ def _pooling_per_namespace(pooling: str, policy: dict) -> dict[str, str]:
 def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensemble=None,
         min_count=None, hidden_dims=None, epochs=TRAIN_EPOCHS, lr=TRAIN_LR,
         batch_size=TRAIN_BATCH_SIZE, holdout_family=_USE_DOMAIN, use_cluster=True,
-        save=True, records_path=None):
+        save=True, records_path=None, finetune="none", loss="bce",
+        max_length=FT_MAX_LENGTH, grad_accum=FT_GRAD_ACCUM, train_pool_cap=None):
     import numpy as np
     import torch
 
@@ -91,11 +100,15 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
     hp = SimpleNamespace(model_key=model_key, min_count=min_count, hidden=hidden_dims,
                          epochs=epochs, attn_epochs=ATTN_EPOCHS, lr=lr, batch=batch_size,
                          attn_batch=ATTN_BATCH, heads=ATTN_HEADS, max_residues=MAX_RESIDUES,
-                         train_pool_cap=None, input_dim=ESM2_MODELS[model_key].dim)
+                         train_pool_cap=train_pool_cap, input_dim=ESM2_MODELS[model_key].dim,
+                         loss=loss, max_length=max_length, ft_batch=FT_BATCH_SIZE,
+                         ft_grad_accum=grad_accum, ft_epochs=FT_EPOCHS,
+                         ft_hidden=list(FT_HIDDEN_DIMS), ft_dropout=FT_DROPOUT,
+                         ft_backbone_lr=FT_BACKBONE_LR, ft_head_lr=FT_HEAD_LR)
     pooling_by_ns = _pooling_per_namespace(pooling, policy)
 
     print(f"[1/5] domain={domain} | device={device} | pooling={pooling_by_ns} | "
-          f"ensemble={ensemble or 'none'} | loading GO DAG …")
+          f"finetune={finetune} | loss={loss} | ensemble={ensemble or 'none'} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
 
     src = f"cached records {records_path}" if records_path else f"{domain} reviewed proteins"
@@ -106,15 +119,21 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
 
     split = pipeline.make_split(proteins, use_cluster=use_cluster, holdout_family=holdout_family,
                                 family_suffixes=dom.family_suffixes)
-    pools = {"all": split.train, "manual_having": [p for p in split.train if p.has_manual]}
+    train_prots = split.train
+    if finetune == "lora" and train_pool_cap:
+        from viral_annotation.training.heads import cap_pool
+        train_prots = cap_pool(split.train, train_pool_cap, TRAIN_SEED)
+        print(f"       fine-tune train pool capped {len(split.train)} -> {len(train_prots)}")
+    pools = {"all": train_prots, "manual_having": [p for p in train_prots if p.has_manual]}
     print(f"[3/5] {'cluster' if use_cluster else 'random'} split: {split.summary()} "
           f"| manual-having train {len(pools['manual_having'])}")
     if not split.val or not split.test:
         raise SystemExit("val/test empty — too few manual-having proteins. Increase --limit.")
 
-    # Per-residue cache is only needed when some namespace uses attention pooling.
+    # Per-residue cache is only needed for the FROZEN attention path. The LoRA
+    # fine-tune path computes residues live and back-propagates, so no cache.
     cache_dir = None
-    if "attention" in pooling_by_ns.values():
+    if "attention" in pooling_by_ns.values() and finetune != "lora":
         print("[4/5] caching per-residue embeddings for attention namespaces …")
         attn_pools = {policy[ns]["train_pool"] for ns in GO_NAMESPACES
                       if pooling_by_ns[ns] == "attention"}
@@ -127,7 +146,16 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
         print("[4/5] (pooled features — no per-residue cache needed)")
 
     homology_db = pools["manual_having"]   # homology transfers these proteins' manual labels
-    print(f"[5/5] training per-namespace heads{' + homology ensemble' if ensemble else ''} …")
+    # The LoRA path trains one shared-backbone multi-task model up front, then wraps
+    # each namespace as a Head so the eval/report path below is reused unchanged.
+    ft_heads, ft_artifacts = {}, None
+    if finetune == "lora":
+        from viral_annotation.training.finetune import run_finetune
+        print("[5/5] fine-tuning shared LoRA backbone + per-namespace heads …")
+        ft_heads, ft_artifacts = run_finetune(split, pools, policy, pooling_by_ns,
+                                              dag, device, hp)
+    else:
+        print(f"[5/5] training per-namespace heads{' + homology ensemble' if ensemble else ''} …")
     heads: dict[str, object] = {}
     # Accumulated [P x N_ns] blocks for the across-namespace overall metric.
     test = {"model": [], "true": [], "naive": [], "plm": []}
@@ -135,8 +163,9 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
     test_rows, zero_rows = [], []
 
     for ns in GO_NAMESPACES:
-        head = fit_namespace(ns, policy[ns], pooling_by_ns[ns], split, pools,
-                             dag, device, cache_dir, hp)
+        head = (ft_heads.get(ns) if finetune == "lora"
+                else fit_namespace(ns, policy[ns], pooling_by_ns[ns], split, pools,
+                                   dag, device, cache_dir, hp))
         if head is None:
             print(f"       {report.NS_SHORT[ns]}: empty vocab — skipped")
             continue
@@ -168,7 +197,13 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
     print(f"\n[done] elapsed {time.time() - t0:.1f}s")
 
     if save:
-        _save(heads, pooling, model_key, hidden_dims, test, test_rows, dom.models_dir, policy)
+        if finetune == "lora":
+            if ft_artifacts is not None:
+                from viral_annotation.training.finetune import save_finetuned
+                out = save_finetuned(ft_artifacts, dom.models_dir / "finetuned", test_rows)
+                print(f"[saved] {out} (LoRA adapter + heads + meta.json)")
+        else:
+            _save(heads, pooling, model_key, hidden_dims, test, test_rows, dom.models_dir, policy)
     return heads
 
 

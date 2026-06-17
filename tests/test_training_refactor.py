@@ -29,10 +29,13 @@ def test_pooling_per_namespace_reads_policy():
     assert resolved["biological_process"] == "mean"
 
 
-def test_pooling_per_namespace_bacterial_is_all_mean():
-    # The bacterial profile pools mean everywhere (scale-driven default).
+def test_pooling_per_namespace_bacterial_is_attention_mf():
+    # The bacterial profile pools attention for MF (localized catalytic signal,
+    # reached via the LoRA fine-tune path) and mean for BP/CC.
     resolved = _pooling_per_namespace("per-namespace", BACTERIAL_NAMESPACE_POLICY)
-    assert set(resolved.values()) == {"mean"}
+    assert resolved["molecular_function"] == "attention"
+    assert resolved["biological_process"] == "mean"
+    assert resolved["cellular_component"] == "mean"
 
 
 def test_overall_fmax_concatenates_namespace_blocks():

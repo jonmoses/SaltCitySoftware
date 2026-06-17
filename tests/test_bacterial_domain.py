@@ -30,13 +30,16 @@ def test_bacterial_domain_profile():
     assert get_domain("viral").models_subdir == ""
 
 
-def test_bacterial_policy_all_asymmetric_mean():
-    # Starting bacterial policy: train manual+IEA, mean pooling, every namespace.
+def test_bacterial_policy_asymmetric_attention_mf():
+    # Bacterial policy: train manual+IEA everywhere; MF pools attention (reached via
+    # the LoRA fine-tune path), BP/CC pool mean.
     for ns in GO_NAMESPACES:
         pol = BACTERIAL_NAMESPACE_POLICY[ns]
         assert pol["train_field"] == "terms_all"
         assert pol["vocab_field"] == "terms_all"
-        assert pol["pooling"] == "mean"
+    assert BACTERIAL_NAMESPACE_POLICY["molecular_function"]["pooling"] == "attention"
+    assert BACTERIAL_NAMESPACE_POLICY["biological_process"]["pooling"] == "mean"
+    assert BACTERIAL_NAMESPACE_POLICY["cellular_component"]["pooling"] == "mean"
 
 
 def test_family_of_suffix_configurable():

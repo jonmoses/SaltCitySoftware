@@ -58,19 +58,21 @@ def compute_pos_weight(Ytr):
 
 # --- pooled (fixed-feature) head -------------------------------------------
 def fit_pooled_head(Xtr, Ytr, Xva, Yva, *, hidden_dims, epochs, lr, batch_size,
-                    device, patience, pos_weight=None):
+                    device, patience, pos_weight=None, loss="bce"):
     """Train a linear/MLP head on fixed pooled features; early-stop on val Fmax.
 
+    `loss` is "bce" (positive-weighted, default) or "asl" (asymmetric multi-label).
     Returns (best_model, best_val_fmax, epochs_run).
     """
     import torch
-    from torch import nn
+
+    from viral_annotation.classifier.losses import make_loss
 
     if pos_weight is None:
         pos_weight = compute_pos_weight(Ytr)
 
     model = build_classifier(Xtr.shape[1], Ytr.shape[1], hidden_dims=hidden_dims).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, device=device))
+    criterion = make_loss(loss, pos_weight=pos_weight, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=TRAIN_WEIGHT_DECAY)
     Xt = torch.tensor(Xtr, device=device)
     Yt = torch.tensor(Ytr, device=device)
@@ -83,7 +85,7 @@ def fit_pooled_head(Xtr, Ytr, Xva, Yva, *, hidden_dims, epochs, lr, batch_size,
         for s in range(0, n, batch_size):
             idx = perm[s:s + batch_size]
             optimizer.zero_grad()
-            criterion(model(Xt[idx]), Yt[idx]).backward()
+            criterion(model(Xt[idx]), Yt[idx]).mean().backward()
             optimizer.step()
         val_fmax = fmax_matrix(predict_proba(model, Xva), Yva).fmax
         if val_fmax > best + 1e-4:
@@ -147,15 +149,17 @@ def predict_residues(model, dataset, device, batch_size):
 
 
 def fit_attention_head(train_ds, val_ds, Yval, input_dim, num_terms, pos_weight, *,
-                       n_heads, hidden_dims, epochs, lr, batch_size, device, patience):
+                       n_heads, hidden_dims, epochs, lr, batch_size, device, patience,
+                       loss="bce"):
     """Train an attention pooler + head jointly; early-stop on val Fmax."""
     import torch
-    from torch import nn
     from torch.utils.data import DataLoader
+
+    from viral_annotation.classifier.losses import make_loss
 
     model = build_attn_classifier(input_dim, num_terms, n_heads=n_heads,
                                   hidden_dims=hidden_dims).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, device=device))
+    criterion = make_loss(loss, pos_weight=pos_weight, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=TRAIN_WEIGHT_DECAY)
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_residues)
 
@@ -164,7 +168,7 @@ def fit_attention_head(train_ds, val_ds, Yval, input_dim, num_terms, pos_weight,
         model.train()
         for X, mask, Y in loader:
             optimizer.zero_grad()
-            criterion(model(X.to(device), mask.to(device)), Y.to(device)).backward()
+            criterion(model(X.to(device), mask.to(device)), Y.to(device)).mean().backward()
             optimizer.step()
         val_fmax = fmax_matrix(predict_residues(model, val_ds, device, batch_size), Yval).fmax
         if val_fmax > best + 1e-4:
@@ -216,7 +220,8 @@ def fit_namespace(ns, policy, pooling, split, pools, dag, device, cache_dir, hp)
         model, val_fmax, epochs = fit_attention_head(
             train_ds, val_ds, Yval, hp.input_dim, len(vocab), pos_weight,
             n_heads=hp.heads, hidden_dims=hp.hidden, epochs=hp.attn_epochs, lr=hp.lr,
-            batch_size=hp.attn_batch, device=device, patience=TRAIN_EARLY_STOP_PATIENCE)
+            batch_size=hp.attn_batch, device=device, patience=TRAIN_EARLY_STOP_PATIENCE,
+            loss=getattr(hp, "loss", "bce"))
 
         def predict(prots):
             ds = make_residue_dataset(prots, np.zeros((len(prots), len(vocab)), "float32"),
@@ -231,7 +236,7 @@ def fit_namespace(ns, policy, pooling, split, pools, dag, device, cache_dir, hp)
         model, val_fmax, epochs = fit_pooled_head(
             Xtr, Ytr, Xva, Yval, hidden_dims=hp.hidden, epochs=hp.epochs, lr=hp.lr,
             batch_size=hp.batch, device=device, patience=TRAIN_EARLY_STOP_PATIENCE,
-            pos_weight=pos_weight)
+            pos_weight=pos_weight, loss=getattr(hp, "loss", "bce"))
 
         def predict(prots):
             _, X = embed_records(prots, hp.model_key, pooling, None, embedder=embedder)

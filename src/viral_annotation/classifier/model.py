@@ -15,7 +15,8 @@ empirical. This module is just the architecture. torch is imported lazily.
 from __future__ import annotations
 
 
-def build_classifier(input_dim: int, num_terms: int, hidden_dims=None, dropout: float = 0.0):
+def build_classifier(input_dim: int, num_terms: int, hidden_dims=None, dropout: float = 0.0,
+                     layernorm: bool = False, gelu: bool = False):
     """Construct the multi-label head as a torch.nn.Module.
 
     Args:
@@ -23,6 +24,10 @@ def build_classifier(input_dim: int, num_terms: int, hidden_dims=None, dropout: 
         num_terms: N, the number of GO terms in the scoped label set.
         hidden_dims: list of hidden widths; [] or None => linear baseline.
         dropout: dropout prob applied before each linear layer in the MLP case.
+        layernorm: insert a LayerNorm before each hidden Linear (stabilises a
+            deeper/regularised head; used by the LoRA fine-tune path). Off by
+            default so the existing linear/MLP baselines are byte-identical.
+        gelu: use GELU instead of ReLU for hidden activations (off by default).
 
     Returns:
         torch.nn.Module producing raw logits of shape [B, num_terms]. Apply
@@ -30,14 +35,17 @@ def build_classifier(input_dim: int, num_terms: int, hidden_dims=None, dropout: 
     """
     import torch.nn as nn
 
+    act = nn.GELU if gelu else nn.ReLU
     hidden_dims = list(hidden_dims or [])
     layers: list = []
     prev = input_dim
     for h in hidden_dims:
+        if layernorm:
+            layers.append(nn.LayerNorm(prev))
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
         layers.append(nn.Linear(prev, h))
-        layers.append(nn.ReLU())
+        layers.append(act())
         prev = h
     layers.append(nn.Linear(prev, num_terms))  # final logits; sigmoid applied later
     return nn.Sequential(*layers)

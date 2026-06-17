@@ -20,6 +20,8 @@ ml = [
     "transformers>=4.40",
     "scikit-learn>=1.4",
     "scipy>=1.12",
+    "peft>=0.10",          # LoRA adapters for end-to-end backbone fine-tuning
+    "accelerate>=0.28",    # peft/transformers training utilities
 ]
 # Sequence + ontology tooling.
 bio = [
