@@ -48,6 +48,9 @@ def main(argv=None) -> int:
     ap.add_argument("--holdout-family", default=None,
                     help="viral/bacterial family held out for zero-shot eval "
                          "(default: domain profile; empty string to disable)")
+    ap.add_argument("--records", default=None,
+                    help="path to a cached RawProtein JSONL (from labels.save_raw) to load "
+                         "instead of fetching UniProt — must match --domain; skips the fetch")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
 
@@ -62,7 +65,8 @@ def main(argv=None) -> int:
     run(limit=args.limit, domain=args.domain, model_key=args.model_key, pooling=args.pooling,
         ensemble=args.ensemble, min_count=args.min_count, hidden_dims=args.hidden,
         epochs=args.epochs, lr=args.lr, batch_size=args.batch_size,
-        use_cluster=not args.random_split, holdout_family=holdout, save=not args.no_save)
+        use_cluster=not args.random_split, holdout_family=holdout, save=not args.no_save,
+        records_path=args.records)
     return 0
 
 

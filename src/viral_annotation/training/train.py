@@ -72,7 +72,7 @@ def _pooling_per_namespace(pooling: str, policy: dict) -> dict[str, str]:
 def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensemble=None,
         min_count=None, hidden_dims=None, epochs=TRAIN_EPOCHS, lr=TRAIN_LR,
         batch_size=TRAIN_BATCH_SIZE, holdout_family=_USE_DOMAIN, use_cluster=True,
-        save=True):
+        save=True, records_path=None):
     import numpy as np
     import torch
 
@@ -98,8 +98,10 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
           f"ensemble={ensemble or 'none'} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
 
-    print(f"[2/5] fetching {domain} reviewed proteins (limit={limit}) …")
-    proteins = pipeline.load_proteins(dag, limit, query=dom.uniprot_query)
+    src = f"cached records {records_path}" if records_path else f"{domain} reviewed proteins"
+    print(f"[2/5] loading {src} (limit={limit}) …")
+    proteins = pipeline.load_proteins(dag, limit, query=dom.uniprot_query,
+                                      records_path=records_path)
     print(f"       {pipeline.annotation_stats(proteins)}")
 
     split = pipeline.make_split(proteins, use_cluster=use_cluster, holdout_family=holdout_family,

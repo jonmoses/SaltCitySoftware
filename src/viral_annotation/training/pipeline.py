@@ -33,13 +33,26 @@ def annotation_stats(proteins) -> str:
             f"raw annotations manual={n_manual} iea={n_iea}")
 
 
-def load_proteins(dag, limit: int | None = None, query: str = UNIPROT_VIRAL_QUERY) -> list:
-    """Fetch reviewed proteins from UniProt and propagate their GO labels.
+def load_proteins(dag, limit: int | None = None, query: str = UNIPROT_VIRAL_QUERY,
+                  records_path: str | None = None) -> list:
+    """Fetch reviewed proteins (or load a cached JSONL) and propagate their GO labels.
 
     `query` selects the pathogen domain (default the viral taxon); pass a domain
-    profile's `uniprot_query` for bacteria.
+    profile's `uniprot_query` for bacteria. `records_path`, if given, reads cached
+    RawProtein records (from `labels.save_raw`) instead of hitting UniProt — useful
+    to skip the slow, rate-limited fetch on re-runs / in cloud notebooks. It must
+    match the domain you're training (the records aren't re-filtered by `query`).
     """
-    raw = list(labels_mod.fetch_raw(limit=limit, query=query))
+    if records_path:
+        from pathlib import Path
+
+        raw = []
+        for i, r in enumerate(labels_mod.load_raw(Path(records_path))):
+            if limit and i >= limit:
+                break
+            raw.append(r)
+    else:
+        raw = list(labels_mod.fetch_raw(limit=limit, query=query))
     return [p for p in labels_mod.label_proteins(raw, dag) if p.sequence]
 
 
