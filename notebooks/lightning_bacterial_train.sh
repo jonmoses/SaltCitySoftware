@@ -11,7 +11,12 @@
 #   export GITHUB_TOKEN=...   # fine-grained PAT, read-only Contents on jonmoses/SaltCitySoftware
 #   export HF_TOKEN=...       # HuggingFace read token (unauth ESM-2 pulls get throttled)
 #   bash lightning_bacterial_train.sh setup   # clone + deps + mmseqs + GO ontology  (once)
-#   bash lightning_bacterial_train.sh fetch   # cache the UniProt records JSONL       (once, ~25m)
+#   # --- then upload the LOCAL records (data/ is gitignored, so the clone lacks it) ---
+#   #   the bacterial Swiss-Prot pull is already cached locally; ship it instead of
+#   #   re-fetching from UniProt. From your LAPTOP (the .gz is ~73 MB vs 229 MB raw):
+#   #     scp data/bacterial_reviewed.jsonl.gz <lightning-ssh-host>:SaltCitySoftware/data/
+#   #   (or drag-drop the file into the Studio file browser, into the repo's data/ dir).
+#   bash lightning_bacterial_train.sh records # verify/unzip the uploaded local records (once)
 #   bash lightning_bacterial_train.sh diag    # ~10-15m capped run: read real it/s before committing
 #   bash lightning_bacterial_train.sh train   # full run, logged to ~/bacterial_train_*.log
 #
@@ -60,17 +65,27 @@ PY
   echo ">>> setup complete. Remember: export PATH=/tmp/mmseqs/bin:\$PATH in new shells."
 }
 
-# Cache the rate-limited UniProt fetch once so diag/train reuse it via --records.
-fetch() {
-  cd "$WORKDIR"; export PATH="/tmp/mmseqs/bin:$PATH"
-  va-train --domain bacterial --limit 200000 --no-save
-  echo ">>> records cached at $RECORDS"
+# Use the LOCAL bacterial records (uploaded into the repo's data/ dir) instead of a
+# fresh UniProt pull. Decompress the .gz if that's what was shipped, then verify.
+records() {
+  cd "$WORKDIR"
+  if [ ! -f "$RECORDS" ] && [ -f "$RECORDS.gz" ]; then
+    echo ">>> decompressing $RECORDS.gz"
+    gunzip -k "$RECORDS.gz"
+  fi
+  if [ ! -f "$RECORDS" ]; then
+    echo "ERROR: $RECORDS not found. Upload it from your laptop first, e.g.:" >&2
+    echo "  scp data/bacterial_reviewed.jsonl.gz <lightning-ssh-host>:$WORKDIR/data/" >&2
+    exit 1
+  fi
+  echo ">>> using local records: $RECORDS ($(wc -l < "$RECORDS") proteins)"
 }
 
 # Diagnostic: tiny capped fine-tune. Watch the 'fit:' line and per-step 'it/s | ETA' to
 # settle whether the Kaggle 12 h timeout was a hang or just slow, BEFORE committing hours.
 diag() {
   cd "$WORKDIR"; export PATH="/tmp/mmseqs/bin:$PATH"; export HF_TOKEN="${HF_TOKEN:?}"
+  records
   python -u -m viral_annotation.cli.train --domain bacterial --finetune lora \
     --loss asl --pooling per-namespace --min-count 15 \
     --records "$RECORDS" --train-pool-cap 4000
@@ -80,6 +95,7 @@ diag() {
 # If diag showed T4 too slow: switch machine to L4/A10G, or lower --train-pool-cap.
 train() {
   cd "$WORKDIR"; export PATH="/tmp/mmseqs/bin:$PATH"; export HF_TOKEN="${HF_TOKEN:?}"
+  records
   local log="$HOME/bacterial_train_$(date +%Y%m%d_%H%M).log"
   echo ">>> logging to $log"
   python -u -m viral_annotation.cli.train --domain bacterial --finetune lora \
@@ -89,9 +105,9 @@ train() {
 }
 
 case "${1:-}" in
-  setup) setup ;;
-  fetch) fetch ;;
-  diag)  diag ;;
-  train) train ;;
-  *) echo "usage: $0 {setup|fetch|diag|train}"; exit 2 ;;
+  setup)   setup ;;
+  records) records ;;
+  diag)    diag ;;
+  train)   train ;;
+  *) echo "usage: $0 {setup|records|diag|train}"; exit 2 ;;
 esac
