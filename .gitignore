@@ -16,11 +16,16 @@ venv/
 # Data / model artifacts (large or generated; never commit).
 # Anchored with a leading slash so these match ONLY the repo-root dirs — an
 # unanchored "data/" would also ignore the src/viral_annotation/data package.
-/data/
+/data/*
 !/data/.gitkeep
+# Cached bacterial UniProt records (gzipped, ~73MB) — committed so training
+# doesn't have to re-fetch from UniProt. gunzip once before use.
+!/data/bacterial_reviewed.jsonl.gz
 /models/
 # Generated run outputs (threat profiles, etc.) — regenerable, can be large.
 /results/
+# Kaggle GPU run outputs (logs + repo snapshot) — regenerable, large.
+/kaggle_output/
 *.obo
 *.fasta
 *.fa
