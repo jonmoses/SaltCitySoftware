@@ -36,12 +36,13 @@ class AnnotatedProtein:
 class GoAnnotator:
     """A loaded GO classifier ready to annotate sequences."""
 
-    def __init__(self, heads, terms_by_ns, esm_model, pooling, dag):
+    def __init__(self, heads, terms_by_ns, esm_model, pooling, dag, correct=True):
         self.heads = heads                # ns -> torch.nn.Module (eval mode)
         self.terms_by_ns = terms_by_ns    # ns -> list[str] (column order)
         self.esm_model = esm_model
         self.pooling = pooling
         self.dag = dag
+        self.correct = correct            # apply true-path correction (off for leaf-only models)
 
     @classmethod
     def load(cls, models_dir=MODELS_DIR, dag=None, obo_path=GO_OBO_PATH) -> "GoAnnotator":
@@ -66,14 +67,17 @@ class GoAnnotator:
             model.eval()
             heads[ns], terms_by_ns[ns] = model, terms
 
-        return cls(heads, terms_by_ns, meta["esm_model"], meta["pooling"], dag)
+        # Leaf-only models carry no hierarchy, so skip true-path correction at serve.
+        correct = meta.get("hierarchical_correction", not meta.get("leaf_only", False))
+        return cls(heads, terms_by_ns, meta["esm_model"], meta["pooling"], dag, correct)
 
     def annotate(self, records, threshold: float = 0.01) -> list[AnnotatedProtein]:
         """Annotate `records` (objects with .accession/.sequence) -> AnnotatedProtein.
 
         Embeds once with the model's pooling, predicts every head, merges the
         per-namespace probabilities into one term->prob map per protein, applies
-        true-path correction, and drops terms below `threshold`.
+        true-path correction (unless the model is leaf-only), and drops terms below
+        `threshold`.
         """
         records = list(records)
         if not records:
@@ -81,11 +85,11 @@ class GoAnnotator:
         # One shared embed pass (cached, windowed for long proteins).
         _, X = embed_records(records, self.esm_model, self.pooling, None, window=True)
         per_ns_prob = {ns: predict_proba(self.heads[ns], X) for ns in self.heads}
-        return _assemble(records, self.terms_by_ns, per_ns_prob, self.dag, threshold)
+        return _assemble(records, self.terms_by_ns, per_ns_prob, self.dag, threshold, self.correct)
 
 
-def _assemble(records, terms_by_ns, per_ns_prob, dag, threshold) -> list[AnnotatedProtein]:
-    """Merge per-namespace [P x N] probabilities -> corrected, thresholded annotations."""
+def _assemble(records, terms_by_ns, per_ns_prob, dag, threshold, correct=True) -> list[AnnotatedProtein]:
+    """Merge per-namespace [P x N] probabilities -> (optionally corrected) thresholded annotations."""
     out: list[AnnotatedProtein] = []
     for i, r in enumerate(records):
         scores: dict[str, float] = {}
@@ -93,7 +97,7 @@ def _assemble(records, terms_by_ns, per_ns_prob, dag, threshold) -> list[Annotat
             probs = per_ns_prob[ns][i]
             for col, term in enumerate(terms):
                 scores[term] = float(probs[col])
-        corrected = dag.correct_scores(scores)
+        corrected = dag.correct_scores(scores) if correct else scores
         kept = {t: p for t, p in corrected.items() if p >= threshold}
         out.append(AnnotatedProtein(
             accession=getattr(r, "accession", getattr(r, "id", "")),

@@ -23,7 +23,7 @@ def test_bacterial_domain_profile():
     dom = get_domain("bacterial")
     assert dom.taxon_id == 2
     assert dom.family_suffixes == ("aceae",)
-    assert dom.holdout_family == "Francisellaceae"
+    assert dom.holdout_families == ("Francisellaceae",)
     assert dom.models_subdir == "bacterial"
     assert dom.default_pooling == "mean"
     # Viral profile unchanged (back-compat: artifacts stay at MODELS_DIR root).
@@ -68,7 +68,7 @@ def test_bacterial_target_panel():
     # The held-out family's agent is in the panel — the genuine zero-shot target.
     assert reg["tularemia"].family == "Francisellaceae"
     assert reg["tularemia"].taxon_id == 263
-    assert get_domain("bacterial").holdout_family == reg["tularemia"].family
+    assert get_domain("bacterial").holdout_families == (reg["tularemia"].family,)
 
 
 @pytest.mark.skipif(not GO_OBO_PATH.exists(), reason="go-basic.obo not downloaded")

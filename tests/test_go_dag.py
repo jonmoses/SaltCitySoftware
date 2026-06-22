@@ -86,6 +86,27 @@ def test_propagate_true_path(dag):
     assert propagated == {"GO:0000003", "GO:0000002", "GO:0000001"}
 
 
+def test_most_specific_drops_redundant_ancestors(dag):
+    # Full lineage in -> only the leaf survives (ancestors are redundant).
+    assert dag.most_specific({"GO:0000003", "GO:0000002", "GO:0000001"}) == {"GO:0000003"}
+
+
+def test_most_specific_keeps_independent_leaves(dag):
+    # Two leaves sharing only ancestors -> both kept; the shared parent dropped.
+    assert dag.most_specific({"GO:0000003", "GO:0000004", "GO:0000002"}) == {
+        "GO:0000003", "GO:0000004"
+    }
+
+
+def test_most_specific_resolves_alt_and_skips_unknown(dag):
+    # alt id resolves to its primary; terms absent from the DAG are dropped.
+    assert dag.most_specific({"GO:0000010", "GO:0000001", "GO:9999999"}) == {"GO:0000003"}
+
+
+def test_most_specific_single_term_unchanged(dag):
+    assert dag.most_specific({"GO:0000002"}) == {"GO:0000002"}
+
+
 def test_correct_scores_parent_at_least_child(dag):
     # Child more confident than ancestors -> ancestors lifted to child's score.
     raw = {"GO:0000003": 0.9, "GO:0000002": 0.4, "GO:0000001": 0.2}

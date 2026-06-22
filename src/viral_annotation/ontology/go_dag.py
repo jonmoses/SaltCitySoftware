@@ -150,6 +150,25 @@ class GoDag:
             out |= self.ancestors(tid, include_self=True)
         return out
 
+    def most_specific(self, term_ids: Iterable[str]) -> frozenset[str]:
+        """Reduce a label set to its lowest-level (leaf-of-set) terms.
+
+        The inverse intent of `propagate`: instead of adding ancestors, drop any
+        term that is a *proper ancestor* of another term in the same set, keeping
+        only the most specific annotations a protein actually carries. Used to
+        build leaf-only training labels (no hierarchy, no true-path rule).
+
+        Terms absent from the (non-obsolete) DAG are dropped, mirroring
+        `propagate`. A term with no descendants in the set survives; a parent that
+        is redundant given a more specific child does not.
+        """
+        present = {self.resolve(t) for t in term_ids}
+        present = {t for t in present if t in self._terms}
+        redundant: set[str] = set()
+        for t in present:
+            redundant |= self.ancestors(t, include_self=False) & present
+        return frozenset(present - redundant)
+
     def correct_scores(self, scores: dict[str, float]) -> dict[str, float]:
         """Hierarchical (post-hoc) correction of predicted probabilities.
 

@@ -51,8 +51,15 @@ def main(argv=None) -> int:
                     help="viral/bacterial family held out for zero-shot eval "
                          "(default: domain profile; empty string to disable)")
     ap.add_argument("--records", default=None,
-                    help="path to a cached RawProtein JSONL (from labels.save_raw) to load "
-                         "instead of fetching UniProt — must match --domain; skips the fetch")
+                    help="cached RawProtein JSONL(s) (from labels.save_raw) to load instead of "
+                         "fetching UniProt — must match --domain; skips the fetch. Comma-separate "
+                         "multiple caches (e.g. viral + bacterial for --domain unified)")
+    leaf = ap.add_mutually_exclusive_group()
+    leaf.add_argument("--leaf-only", dest="leaf_only", action="store_const", const=True,
+                      default=None, help="train on most-specific (leaf) labels, no GO hierarchy "
+                      "or true-path correction (default: domain profile)")
+    leaf.add_argument("--no-leaf-only", dest="leaf_only", action="store_const", const=False,
+                      help="force true-path propagation even if the domain defaults to leaf-only")
     ap.add_argument("--finetune", choices=["none", "lora"], default="none",
                     help="'lora' end-to-end fine-tunes the ESM backbone (adapters) + heads; "
                          "default 'none' trains heads on frozen embeddings")
@@ -76,13 +83,16 @@ def main(argv=None) -> int:
     else:
         holdout = args.holdout_family
 
+    # Unset --leaf-only -> defer to the domain profile.
+    leaf_only = _USE_DOMAIN if args.leaf_only is None else args.leaf_only
+
     run(limit=args.limit, domain=args.domain, model_key=args.model_key, pooling=args.pooling,
         ensemble=args.ensemble, min_count=args.min_count, hidden_dims=args.hidden,
         epochs=args.epochs, lr=args.lr, batch_size=args.batch_size,
         use_cluster=not args.random_split, holdout_family=holdout, save=not args.no_save,
         records_path=args.records, finetune=args.finetune, loss=args.loss,
         max_length=args.max_length, grad_accum=args.grad_accum,
-        train_pool_cap=args.train_pool_cap)
+        train_pool_cap=args.train_pool_cap, leaf_only=leaf_only)
     return 0
 
 

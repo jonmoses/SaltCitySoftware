@@ -34,38 +34,47 @@ def annotation_stats(proteins) -> str:
 
 
 def load_proteins(dag, limit: int | None = None, query: str = UNIPROT_VIRAL_QUERY,
-                  records_path: str | None = None) -> list:
-    """Fetch reviewed proteins (or load a cached JSONL) and propagate their GO labels.
+                  records_path=None, leaf_only: bool = False) -> list:
+    """Fetch reviewed proteins (or load cached JSONL caches) and build GO labels.
 
     `query` selects the pathogen domain (default the viral taxon); pass a domain
     profile's `uniprot_query` for bacteria. `records_path`, if given, reads cached
     RawProtein records (from `labels.save_raw`) instead of hitting UniProt — useful
-    to skip the slow, rate-limited fetch on re-runs / in cloud notebooks. It must
-    match the domain you're training (the records aren't re-filtered by `query`).
+    to skip the slow, rate-limited fetch on re-runs / in cloud notebooks. It may be
+    a single path or several (list, or comma-separated string) which are
+    concatenated — e.g. the viral + bacterial caches for the unified domain. Cached
+    records must match the domain(s) you're training (they aren't re-filtered by
+    `query`). `leaf_only` builds most-specific (leaf) labels instead of propagating.
     """
     if records_path:
         from pathlib import Path
 
+        if isinstance(records_path, str):
+            paths = [p.strip() for p in records_path.split(",") if p.strip()]
+        else:
+            paths = list(records_path)
         raw = []
-        for i, r in enumerate(labels_mod.load_raw(Path(records_path))):
-            if limit and i >= limit:
-                break
-            raw.append(r)
+        for path in paths:
+            for i, r in enumerate(labels_mod.load_raw(Path(path))):
+                if limit and i >= limit:
+                    break
+                raw.append(r)
     else:
         raw = list(labels_mod.fetch_raw(limit=limit, query=query))
-    return [p for p in labels_mod.label_proteins(raw, dag) if p.sequence]
+    return [p for p in labels_mod.label_proteins(raw, dag, leaf_only=leaf_only) if p.sequence]
 
 
-def make_split(proteins, *, use_cluster: bool = True, holdout_family: str | None = HOLDOUT_FAMILY,
+def make_split(proteins, *, use_cluster: bool = True, holdout_families=HOLDOUT_FAMILY,
                family_suffixes: tuple[str, ...] = ("viridae",)):
-    """Split proteins into train/val/test (+ optional held-out family).
+    """Split proteins into train/val/test (+ optional held-out families).
 
     `use_cluster` uses the leakage-safe 30%-identity cluster split; otherwise a
     plain random split (not leakage-safe — for quick checks only). `family_suffixes`
-    is the lineage-clade suffix that identifies the holdout family rank (viral
-    'viridae'; bacterial 'aceae').
+    is the lineage-clade suffix(es) that identify the holdout family rank (viral
+    'viridae'; bacterial 'aceae'). `holdout_families` may be a single family name or
+    a collection (one viral + one bacterial for the unified domain).
     """
     if use_cluster:
         return cluster_split(proteins, cluster_sequences(proteins),
-                             holdout_family=holdout_family, family_suffixes=family_suffixes)
+                             holdout_families=holdout_families, family_suffixes=family_suffixes)
     return split_proteins(proteins)

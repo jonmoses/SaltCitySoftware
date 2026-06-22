@@ -51,6 +51,7 @@ IEA_EVIDENCE_PREFIX = "IEA"
 
 # Local cache of the raw fetched records (JSONL), so re-runs skip the network.
 VIRAL_RECORDS_PATH = DATA_DIR / "viral_reviewed.jsonl"
+BACTERIAL_RECORDS_PATH = DATA_DIR / "bacterial_reviewed.jsonl"
 
 
 # --- Term-set selection -----------------------------------------------------
@@ -214,24 +215,52 @@ BACTERIAL_NAMESPACE_POLICY = {
 }
 
 
+# --- Unified (viral + bacterial) leaf-only policy ---------------------------
+# The unified domain drops the GO hierarchy entirely: labels are the most-specific
+# (leaf-of-set) terms a protein carries — no true-path propagation, no hierarchical
+# correction. Evidence is symmetric (all three namespaces train on manual+IEA,
+# mean-pooled & servable) since there's no per-namespace IEA pathology to dodge
+# once labels are leaf-only; val/test still score against manual-only leaf terms.
+UNIFIED_NAMESPACE_POLICY = {
+    "molecular_function": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
+    },
+    "biological_process": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
+    },
+    "cellular_component": {
+        "train_pool": "all", "train_field": "terms_all",
+        "vocab_field": "terms_all", "pooling": "mean",
+    },
+}
+
+
 @dataclass(frozen=True)
 class PathogenDomain:
     """A pathogen class the pipeline can be trained/served for.
 
     `models_subdir` is "" for the viral domain (artifacts stay at MODELS_DIR root,
     preserving the existing models/go_classifier.pt); other domains nest under it.
+    `holdout_families` is the zero-shot family holdout (one viral + one bacterial
+    for the unified domain). `leaf_only` builds most-specific (leaf) labels and
+    disables hierarchical correction. `records` is an optional default set of
+    cached RawProtein JSONLs to train from (avoids a huge live fetch for unified).
     """
 
     key: str
     taxon_id: int
     uniprot_query: str
     family_suffixes: tuple[str, ...]   # lineage-clade suffixes that mark the holdout rank
-    holdout_family: str | None
+    holdout_families: tuple[str, ...]
     namespace_policy: dict
     min_term_count: int
     default_pooling: str
     default_esm_model: str
     models_subdir: str
+    leaf_only: bool = False
+    records: tuple[Path, ...] = ()
 
     @property
     def models_dir(self) -> Path:
@@ -244,7 +273,7 @@ DOMAINS: dict[str, PathogenDomain] = {
         taxon_id=VIRUSES_TAXON_ID,
         uniprot_query=UNIPROT_VIRAL_QUERY,
         family_suffixes=("viridae",),          # ICTV family rank
-        holdout_family=HOLDOUT_FAMILY,
+        holdout_families=(HOLDOUT_FAMILY,),
         namespace_policy=NAMESPACE_POLICY,
         min_term_count=MIN_TERM_COUNT,
         default_pooling=DEFAULT_POOLING,
@@ -256,12 +285,28 @@ DOMAINS: dict[str, PathogenDomain] = {
         taxon_id=2,
         uniprot_query="(reviewed:true) AND (taxonomy_id:2)",
         family_suffixes=("aceae",),            # LPSN/NCBI bacterial family rank
-        holdout_family="Francisellaceae",      # tularemia agent; contained, BSL-3
+        holdout_families=("Francisellaceae",), # tularemia agent; contained, BSL-3
         namespace_policy=BACTERIAL_NAMESPACE_POLICY,
         min_term_count=15,                     # floor for the larger corpus (raised vs viral's 10)
         default_pooling="mean",
         default_esm_model=DEFAULT_ESM_MODEL,
         models_subdir="bacterial",
+    ),
+    "unified": PathogenDomain(
+        key="unified",
+        taxon_id=1,                            # root taxon: spans viral + bacterial
+        uniprot_query="(reviewed:true) AND (taxonomy_id:10239 OR taxonomy_id:2)",
+        family_suffixes=("viridae", "aceae"),  # both ranks, so family_of matches either domain
+        # one viral + one bacterial family, zero-shot. Arenaviridae (Lassa/LCMV): small
+        # footprint (~95 reviewed) but 45 manual-having -> a stable held-out Fmax.
+        holdout_families=("Arenaviridae", "Francisellaceae"),
+        namespace_policy=UNIFIED_NAMESPACE_POLICY,
+        min_term_count=5,                      # low floor: leaf terms are specific/rare; keep viral signal
+        default_pooling="mean",
+        default_esm_model=DEFAULT_ESM_MODEL,
+        models_subdir="unified",
+        leaf_only=True,
+        records=(VIRAL_RECORDS_PATH, BACTERIAL_RECORDS_PATH),  # train from caches, not a live mega-fetch
     ),
 }
 

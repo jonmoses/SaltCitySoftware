@@ -78,10 +78,19 @@ def split_proteins(
     return Split(train=train_manual + iea_only, val=val, test=test)
 
 
+def _holdout_set(holdout_families) -> set[str]:
+    """Normalize the holdout-family argument (str | iterable | None) to a set."""
+    if not holdout_families:
+        return set()
+    if isinstance(holdout_families, str):
+        return {holdout_families}
+    return set(holdout_families)
+
+
 def cluster_split(
     proteins: list,
     clusters: dict[str, str],
-    holdout_family: str | None = None,
+    holdout_families=None,
     ratios: tuple[float, float, float] = SPLIT_RATIOS,
     seed: int = SPLIT_SEED,
     family_suffixes: tuple[str, ...] = ("viridae",),
@@ -89,9 +98,10 @@ def cluster_split(
     """Identity-cluster split with optional whole-family holdout (docs/03).
 
     Combines three constraints:
-      * Family holdout — every protein of `holdout_family` is removed from
-        train/val/test entirely; its manual-having members become the zero-shot
-        `holdout` set.
+      * Family holdout — every protein whose family is in `holdout_families`
+        (a single name or a collection, e.g. one viral + one bacterial family
+        for the unified model) is removed from train/val/test entirely; its
+        manual-having members become the zero-shot `holdout` set.
       * Cluster integrity — whole clusters go to one bucket, so no test/val
         protein has a >=30%-identity homolog in train. IEA-only members of
         val/test clusters are dropped (they can't go to train without leaking).
@@ -101,10 +111,11 @@ def cluster_split(
     `clusters` maps accession -> cluster representative (from cluster_sequences),
     computed over all `proteins`.
     """
+    families = _holdout_set(holdout_families)
     holdout = []
     pool = []
     for p in proteins:
-        if holdout_family and family_of(p.lineage, family_suffixes) == holdout_family:
+        if families and family_of(p.lineage, family_suffixes) in families:
             if p.has_manual:
                 holdout.append(p)
         else:

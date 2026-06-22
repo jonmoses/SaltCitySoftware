@@ -169,19 +169,26 @@ def load_raw(path: Path = VIRAL_RECORDS_PATH) -> Iterator[RawProtein]:
 
 
 # --- labeling (needs the GO DAG) -------------------------------------------
-def label_proteins(raw: Iterable[RawProtein], dag) -> list[LabeledProtein]:
-    """Propagate each protein's tier-split annotations through the GO DAG.
+def label_proteins(raw: Iterable[RawProtein], dag, leaf_only: bool = False) -> list[LabeledProtein]:
+    """Build each protein's tier-split GO label sets from the DAG.
 
     `dag` is a viral_annotation.ontology.GoDag. Annotations to terms absent from
-    the (non-obsolete) DAG are dropped by GoDag.propagate's resolution.
+    the (non-obsolete) DAG are dropped during resolution.
+
+    Default (``leaf_only=False``): true-path **propagation** — each set is closed
+    under ancestors. With ``leaf_only=True``: **most-specific** reduction instead —
+    each set keeps only its lowest-level (leaf-of-set) terms, dropping any term
+    that is an ancestor of another in the same set. The field names are identical
+    either way, so everything downstream (vocab/label matrices) is unchanged.
     """
+    reduce = dag.most_specific if leaf_only else dag.propagate
     out: list[LabeledProtein] = []
     for r in raw:
         manual = [gid for gid, tier in r.annotations if tier == "manual"]
         iea = [gid for gid, tier in r.annotations if tier == "iea"]
-        terms_manual = frozenset(dag.propagate(manual))
-        terms_all = frozenset(dag.propagate(manual + iea))
-        terms_iea = frozenset(dag.propagate(iea))
+        terms_manual = frozenset(reduce(manual))
+        terms_all = frozenset(reduce(manual + iea))
+        terms_iea = frozenset(reduce(iea))
         out.append(
             LabeledProtein(
                 accession=r.accession,

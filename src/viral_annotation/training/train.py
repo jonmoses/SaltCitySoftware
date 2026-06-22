@@ -81,7 +81,8 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
         min_count=None, hidden_dims=None, epochs=TRAIN_EPOCHS, lr=TRAIN_LR,
         batch_size=TRAIN_BATCH_SIZE, holdout_family=_USE_DOMAIN, use_cluster=True,
         save=True, records_path=None, finetune="none", loss="bce",
-        max_length=FT_MAX_LENGTH, grad_accum=FT_GRAD_ACCUM, train_pool_cap=None):
+        max_length=FT_MAX_LENGTH, grad_accum=FT_GRAD_ACCUM, train_pool_cap=None,
+        leaf_only=_USE_DOMAIN):
     import numpy as np
     import torch
 
@@ -91,7 +92,12 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
     model_key = model_key or dom.default_esm_model
     pooling = pooling or dom.default_pooling
     min_count = dom.min_term_count if min_count is None else min_count
-    holdout_family = dom.holdout_family if holdout_family is _USE_DOMAIN else holdout_family
+    holdout_family = dom.holdout_families if holdout_family is _USE_DOMAIN else holdout_family
+    leaf_only = dom.leaf_only if leaf_only is _USE_DOMAIN else leaf_only
+    # Unified-style domains ship a default set of cached record JSONLs (viral +
+    # bacterial) so we never trigger a giant live multi-taxon fetch.
+    if records_path is None and dom.records:
+        records_path = list(dom.records)
 
     t0 = time.time()
     torch.manual_seed(TRAIN_SEED)
@@ -108,16 +114,17 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
     pooling_by_ns = _pooling_per_namespace(pooling, policy)
 
     print(f"[1/5] domain={domain} | device={device} | pooling={pooling_by_ns} | "
-          f"finetune={finetune} | loss={loss} | ensemble={ensemble or 'none'} | loading GO DAG …")
+          f"finetune={finetune} | loss={loss} | labels={'leaf-only' if leaf_only else 'propagated'} | "
+          f"ensemble={ensemble or 'none'} | loading GO DAG …")
     dag = GoDag.from_obo(GO_OBO_PATH)
 
     src = f"cached records {records_path}" if records_path else f"{domain} reviewed proteins"
     print(f"[2/5] loading {src} (limit={limit}) …")
     proteins = pipeline.load_proteins(dag, limit, query=dom.uniprot_query,
-                                      records_path=records_path)
+                                      records_path=records_path, leaf_only=leaf_only)
     print(f"       {pipeline.annotation_stats(proteins)}")
 
-    split = pipeline.make_split(proteins, use_cluster=use_cluster, holdout_family=holdout_family,
+    split = pipeline.make_split(proteins, use_cluster=use_cluster, holdout_families=holdout_family,
                                 family_suffixes=dom.family_suffixes)
     train_prots = split.train
     if finetune == "lora" and train_pool_cap:
@@ -172,17 +179,22 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
         vocab = head.vocab
         heads[ns] = head
 
-        weights = _fit_ensemble_weights(head, split, homology_db, dag, ensemble)
+        weights = _fit_ensemble_weights(head, split, homology_db, dag, ensemble, leaf_only)
+
+        def correct(prob):
+            """True-path correction — a no-op under leaf-only labels (no hierarchy)."""
+            return prob if leaf_only else apply_hierarchical_correction(prob, vocab, dag)
 
         def scored(prots):
-            """(pLM prob, final model prob) for a protein set, hierarchically corrected."""
-            plm = apply_hierarchical_correction(head.predict(prots), vocab, dag)
+            """(pLM prob, final model prob) for a protein set, hierarchically corrected
+            unless the domain is leaf-only (then scored as-is)."""
+            plm = correct(head.predict(prots))
             if ensemble == "homology":
                 from viral_annotation.classifier.ensemble import fuse
                 from viral_annotation.data.homology import homology_scores
                 fused = fuse({"plm": plm, "homology": homology_scores(prots, homology_db, dag, vocab)},
                              weights)
-                return plm, apply_hierarchical_correction(fused, vocab, dag)
+                return plm, correct(fused)
             return plm, plm
 
         zline = ""
@@ -193,7 +205,7 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
               f"test {test_rows[-1][1].fmax:.4f} (naive {test_rows[-1][2].fmax:.4f}){zline} "
               f"val={head.val_fmax:.3f} ep={head.epochs}", flush=True)
 
-    _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split)
+    _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split, leaf_only)
     print(f"\n[done] elapsed {time.time() - t0:.1f}s")
 
     if save:
@@ -203,11 +215,12 @@ def run(limit=None, domain=DEFAULT_DOMAIN, model_key=None, pooling=None, ensembl
                 out = save_finetuned(ft_artifacts, dom.models_dir / "finetuned", test_rows)
                 print(f"[saved] {out} (LoRA adapter + heads + meta.json)")
         else:
-            _save(heads, pooling, model_key, hidden_dims, test, test_rows, dom.models_dir, policy)
+            _save(heads, pooling, model_key, hidden_dims, test, test_rows, dom.models_dir,
+                  policy, leaf_only)
     return heads
 
 
-def _fit_ensemble_weights(head, split, homology_db, dag, ensemble):
+def _fit_ensemble_weights(head, split, homology_db, dag, ensemble, leaf_only=False):
     """Grid-search per-namespace fusion weights on validation (None if no ensemble)."""
     if ensemble != "homology":
         return None
@@ -215,8 +228,9 @@ def _fit_ensemble_weights(head, split, homology_db, dag, ensemble):
     from viral_annotation.data.homology import homology_scores
 
     vocab = head.vocab
+    plm = head.predict(split.val)
     val_comps = {
-        "plm": apply_hierarchical_correction(head.predict(split.val), vocab, dag),
+        "plm": plm if leaf_only else apply_hierarchical_correction(plm, vocab, dag),
         "homology": homology_scores(split.val, homology_db, dag, vocab),
     }
     weights, _ = search_weights(val_comps, build_labels(split.val, vocab, "terms_manual"))
@@ -238,10 +252,12 @@ def _eval_split(ns, head, prots, scored, dag, acc, rows, *, zero_shot) -> str:
     return f" | zero-shot {res.fmax:.4f} (naive {naive_res.fmax:.4f})" if zero_shot else ""
 
 
-def _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split):
+def _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, split,
+                   leaf_only=False):
     overall = report.overall_fmax(test["model"], test["true"])
     overall_naive = report.overall_fmax(test["naive"], test["true"])
-    report.print_table("TEST (manual-only labels, hierarchically corrected)",
+    corr = "leaf-only labels, no hierarchy" if leaf_only else "hierarchically corrected"
+    report.print_table(f"TEST (manual-only labels, {corr})",
                        test_rows, overall, overall_naive)
     if ensemble:
         plm_overall = report.overall_fmax(test["plm"], test["true"])
@@ -251,7 +267,8 @@ def _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, s
     if split.holdout and zero_rows:
         z_overall = report.overall_fmax(zero["model"], zero["true"])
         z_naive = report.overall_fmax(zero["naive"], zero["true"])
-        report.print_table(f"ZERO-SHOT — held-out {holdout_family} "
+        fam = holdout_family if isinstance(holdout_family, str) else ", ".join(holdout_family or [])
+        report.print_table(f"ZERO-SHOT — held-out {fam} "
                            f"({len(split.holdout)} proteins, never trained on)",
                            zero_rows, z_overall, z_naive)
         if ensemble:
@@ -260,7 +277,8 @@ def _print_reports(test, test_rows, zero, zero_rows, ensemble, holdout_family, s
                   f"{z_overall.fmax - z_plm.fmax:+.4f})")
 
 
-def _save(heads, pooling, model_key, hidden_dims, test, test_rows, models_dir, policy):
+def _save(heads, pooling, model_key, hidden_dims, test, test_rows, models_dir, policy,
+          leaf_only=False):
     """Persist pooled heads (state_dict + meta) under the domain's models dir.
     Attention heads aren't servable by the lightweight loader, so skip saving when
     any head used attention pooling."""
@@ -280,6 +298,8 @@ def _save(heads, pooling, model_key, hidden_dims, test, test_rows, models_dir, p
         "esm_model": model_key,
         "pooling": pooling,                 # uniform across heads when saved
         "hidden_dims": hidden_dims or [],
+        "leaf_only": leaf_only,             # leaf labels -> serving skips hierarchical correction
+        "hierarchical_correction": not leaf_only,
         "overall_fmax": overall.fmax,
         "namespaces": {
             ns: {

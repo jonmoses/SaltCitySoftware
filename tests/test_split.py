@@ -70,7 +70,7 @@ def test_cluster_split_holds_out_family_and_keeps_val_test_manual():
     for i in range(5):   # 5 Coronaviridae manual -> holdout
         p = _protein(f"C{i}", True, family="Coronaviridae"); prots.append(p); clusters[p.accession] = p.accession
 
-    s = cluster_split(prots, clusters, holdout_family="Coronaviridae",
+    s = cluster_split(prots, clusters, holdout_families="Coronaviridae",
                       ratios=(0.7, 0.15, 0.15), seed=0)
 
     assert len(s.holdout) == 5
@@ -78,6 +78,24 @@ def test_cluster_split_holds_out_family_and_keeps_val_test_manual():
     assert not any(p.accession.startswith("C") for p in placed)  # family fully held out
     assert all(p.has_manual for p in s.val + s.test)             # val/test manual-only
     assert sum(1 for p in s.train if not p.has_manual) == 10     # IEA-only singletons -> train
+
+
+def test_cluster_split_holds_out_multiple_families():
+    # Unified domain holds out one viral + one bacterial family at once.
+    prots, clusters = [], {}
+    for i in range(20):
+        p = _protein(f"M{i}", True); prots.append(p); clusters[p.accession] = p.accession
+    for i in range(4):
+        p = _protein(f"V{i}", True, family="Nairoviridae"); prots.append(p); clusters[p.accession] = p.accession
+    for i in range(6):
+        p = _protein(f"B{i}", True, family="Francisellaceae"); prots.append(p); clusters[p.accession] = p.accession
+
+    s = cluster_split(prots, clusters, holdout_families=("Nairoviridae", "Francisellaceae"),
+                      family_suffixes=("viridae", "aceae"), ratios=(0.7, 0.15, 0.15), seed=0)
+
+    assert len(s.holdout) == 10  # both families fully held out
+    placed = s.train + s.val + s.test
+    assert not any(p.accession[0] in {"V", "B"} for p in placed)
 
 
 def test_cluster_split_no_cluster_spans_buckets():
@@ -90,7 +108,7 @@ def test_cluster_split_no_cluster_spans_buckets():
         clusters[m.accession] = f"c{i}"
         clusters[iea.accession] = f"c{i}"
 
-    s = cluster_split(prots, clusters, holdout_family=None, seed=1)
+    s = cluster_split(prots, clusters, holdout_families=None, seed=1)
 
     bucket = {}
     for name, lst in (("train", s.train), ("val", s.val), ("test", s.test)):
