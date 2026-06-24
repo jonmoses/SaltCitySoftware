@@ -119,7 +119,16 @@ class ESMEmbedder:
         if self._device is None:
             self._device = _auto_device(torch)
         self._tokenizer = AutoTokenizer.from_pretrained(self.spec.hf_name)
-        self._model = AutoModel.from_pretrained(self.spec.hf_name).to(self._device).eval()
+        # On CUDA, load the weights in fp16 (not just autocast the math): halves
+        # resident weight memory (~11GB -> ~5.6GB for 3B) so big backbones fit a
+        # 16GB card without spilling to shared system RAM, and it's faster. The
+        # forward already ran fp16 under autocast, so pooled features are
+        # unchanged. CPU/MPS keep fp32 (no fp16 op coverage guarantee).
+        dtype = torch.float16 if self._device == "cuda" else None
+        self._model = (
+            AutoModel.from_pretrained(self.spec.hf_name, torch_dtype=dtype)
+            .to(self._device).eval()
+        )
 
     def embed(self, sequences: Sequence[str], batch_size: int | None = None):
         """Embed sequences -> numpy array [N x D], one vector per protein.
