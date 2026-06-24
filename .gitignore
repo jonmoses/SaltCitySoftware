@@ -18,9 +18,10 @@ venv/
 # unanchored "data/" would also ignore the src/viral_annotation/data package.
 /data/*
 !/data/.gitkeep
-# Cached bacterial UniProt records (gzipped, ~73MB) — committed so training
-# doesn't have to re-fetch from UniProt. gunzip once before use.
+# Cached UniProt records (gzipped) — committed so training/embedding doesn't
+# have to re-fetch from UniProt. scripts/embed_3b.py reads the .gz directly.
 !/data/bacterial_reviewed.jsonl.gz
+!/data/viral_reviewed.jsonl.gz
 /models/
 # Generated run outputs (threat profiles, etc.) — regenerable, can be large.
 /results/
