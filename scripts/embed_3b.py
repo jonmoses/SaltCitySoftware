@@ -31,6 +31,7 @@ Run it:  python scripts/embed_3b.py        (or double-click scripts/embed_3b.bat
 
 from __future__ import annotations
 
+import gzip
 import json
 import sys
 import time
@@ -48,10 +49,9 @@ POOLING = "mean"
 WINDOW = True             # windowed pooling -> esm2_3B_mean_layer-last_win.npz
 
 DATA_DIR = REPO_ROOT / "data"
-RECORD_FILES = [
-    DATA_DIR / "viral_reviewed.jsonl",
-    DATA_DIR / "bacterial_reviewed.jsonl",
-]
+# Each dataset ships in the repo gzipped (.jsonl.gz). An uncompressed .jsonl, if
+# present, wins — but you do NOT need to gunzip anything; the .gz is read directly.
+RECORD_STEMS = ["viral_reviewed", "bacterial_reviewed"]
 
 
 def _check_deps() -> None:
@@ -89,19 +89,27 @@ def _report_device() -> None:
         time.sleep(5)
 
 
+def _resolve(stem: str) -> Path:
+    """Find <stem>.jsonl (preferred) or <stem>.jsonl.gz under data/, or exit."""
+    plain, gz = DATA_DIR / f"{stem}.jsonl", DATA_DIR / f"{stem}.jsonl.gz"
+    if plain.exists():
+        return plain
+    if gz.exists():
+        return gz
+    print(
+        f"\nERROR: neither {plain.name} nor {gz.name} found in {DATA_DIR}.\n"
+        "Both datasets ship in the repo as .jsonl.gz — make sure you cloned the\n"
+        "branch that contains them and that the data/ folder came along.\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _load_records(path: Path) -> list[SimpleNamespace]:
-    """Read accession+sequence from a UniProt record JSONL (ignore the rest)."""
-    if not path.exists():
-        print(
-            f"\nERROR: {path} not found.\n"
-            "Copy the viral_reviewed.jsonl and bacterial_reviewed.jsonl record\n"
-            "dumps into the repo's data/ directory (they are gitignored, so they\n"
-            "won't arrive via `git pull`).\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    """Read accession+sequence from a (optionally gzipped) record JSONL."""
+    opener = gzip.open if path.suffix == ".gz" else open
     out = []
-    with open(path, encoding="utf-8") as fh:
+    with opener(path, "rt", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -127,8 +135,8 @@ def main() -> None:
     print("\nLoading records …")
     records: list[SimpleNamespace] = []
     seen: set[str] = set()
-    for f in RECORD_FILES:
-        for r in _load_records(f):
+    for stem in RECORD_STEMS:
+        for r in _load_records(_resolve(stem)):
             if r.accession not in seen:        # cache is keyed by accession; dedup
                 seen.add(r.accession)
                 records.append(r)
