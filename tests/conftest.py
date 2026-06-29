@@ -65,3 +65,11 @@ def tiny_dag(tmp_path) -> GoDag:
     obo = tmp_path / "tiny.obo"
     obo.write_text(TINY_OBO, encoding="utf-8")
     return GoDag.from_obo(obo)
+
+
+@pytest.fixture
+def tiny_obo_path(tmp_path):
+    """The tiny OBO written to disk; for tools/valib that take an --obo path."""
+    obo = tmp_path / "tiny.obo"
+    obo.write_text(TINY_OBO, encoding="utf-8")
+    return obo

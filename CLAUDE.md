@@ -2,6 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Code style (MANDATORY — applies to all code, all agents and subagents)
+
+Every function written for this project MUST follow these rules. They are
+non-negotiable and apply equally to any agent or subagent that writes code here.
+
+1. **Preconditions and postconditions are commented before every function.** A
+   short comment block immediately above each `def` states what must hold on entry
+   (preconditions) and what is guaranteed on exit (postconditions).
+2. **Inputs and outputs are explicitly labeled.** The same block has an `Inputs:`
+   line and an `Outputs:` line giving the types and meaning of each.
+3. **No function longer than ~40 lines** (one printed sheet: one line per statement,
+   one line per declaration). Going over requires a VERY justifiable, commented
+   reason — default to splitting into named helpers instead.
+4. **Simple control flow only.** Straight-line code; simple `if`; simple, bounded
+   `for`/`while`. No deep nesting, no clever one-liners, no recursion where a loop
+   works. Decompose rather than nest.
+
+Template:
+
+```python
+# Pre:  <what must be true of the inputs / state on entry>
+# Post: <what is guaranteed on return>
+# Inputs:  name (type) — meaning; ...
+# Outputs: (type) — meaning
+def do_one_thing(...):
+    ...
+```
+
 ## What this is
 
 The **functional-annotation stage** of SBIR topic DPA26BZ03-DV014 (Real-Time
