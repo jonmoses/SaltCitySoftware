@@ -41,3 +41,6 @@ embeddings_cache/
 # OS / editor
 .DS_Store
 *.swp
+
+# Claude Code local harness state (settings, worktrees) — not project code.
+.claude/

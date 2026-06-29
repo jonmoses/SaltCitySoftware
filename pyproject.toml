@@ -36,6 +36,7 @@ va-download-go = "viral_annotation.data.download:main"
 va-train = "viral_annotation.cli.train:main"
 va-threat = "viral_annotation.cli.threat:main"
 va-benchmark = "viral_annotation.cli.benchmark:main"
+va-compare-embeddings = "viral_annotation.cli.compare:main"
 
 [build-system]
 requires = ["setuptools>=68"]

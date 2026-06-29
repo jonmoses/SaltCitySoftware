@@ -217,6 +217,144 @@ def smin(prob_matrix, true_matrix, ia, terms, thresholds=None) -> float:
     return best
 
 
+def paired_bootstrap_delta(prob_a, prob_b, true_matrix, metric, *,
+                           n_boot=1000, seed=1337, ci=0.95):
+    """Paired bootstrap CI for the metric delta metric(b) - metric(a).
+
+    `prob_a`, `prob_b`, and `true_matrix` are aligned [P x N] matrices over the
+    SAME proteins (e.g. two models scored on one test set). `metric` is a callable
+    `(prob[P x N], true[P x N]) -> float`. Protein rows are resampled with
+    replacement, the SAME indices for both models (paired), so the CI reflects the
+    per-protein variability of the difference rather than each model's marginal
+    spread. Returns (observed_delta, ci_low, ci_high); a CI excluding 0 means the
+    difference is significant at the (1 - ci) level.
+    """
+    import numpy as np
+
+    a = np.asarray(prob_a)
+    b = np.asarray(prob_b)
+    Y = np.asarray(true_matrix)
+    observed = float(metric(b, Y) - metric(a, Y))
+    P = Y.shape[0]
+    if P == 0 or n_boot <= 0:
+        return observed, observed, observed
+    rng = np.random.RandomState(seed)
+    deltas = np.empty(n_boot, dtype="float64")
+    for i in range(n_boot):
+        idx = rng.randint(0, P, size=P)
+        deltas[i] = metric(b[idx], Y[idx]) - metric(a[idx], Y[idx])
+    half = (1.0 - ci) / 2.0 * 100.0
+    lo, hi = np.percentile(deltas, [half, 100.0 - half])
+    return observed, float(lo), float(hi)
+
+
+def _fmax_smin_perprotein(prob, true_bool, ia_vec, thresholds):
+    """Precompute per-(threshold, protein) sufficient statistics for Fmax and Smin.
+
+    Resampling proteins (the bootstrap) only changes *which* proteins are averaged,
+    not the per-protein/per-threshold quantities — so we compute those once here
+    ([T x P], collapsing the N dimension) and then each resample is a cheap row
+    average with no N factor. Returns numpy arrays, all shape [T, P]:
+
+      prec_per   tp/pred_count   (0 where the protein predicts nothing at tau)
+      predmask   protein predicts >=1 term at tau (precision is averaged only here)
+      rec_per    tp/true_count   (0 where the protein has no true terms)
+      ru_per     IA-weighted true terms missed   (Smin "remaining uncertainty")
+      mi_per     IA-weighted terms wrongly called (Smin "misinformation")
+    """
+    import numpy as np
+
+    P, _ = prob.shape
+    T = len(thresholds)
+    true_count = true_bool.sum(axis=1).astype("float64")
+    nz_true = true_count > 0
+    prec_per = np.zeros((T, P), dtype="float64")
+    predmask = np.zeros((T, P), dtype="bool")
+    rec_per = np.zeros((T, P), dtype="float64")
+    ru_per = np.zeros((T, P), dtype="float64")
+    mi_per = np.zeros((T, P), dtype="float64")
+    for t, tau in enumerate(thresholds):
+        pred = prob >= tau
+        pred_count = pred.sum(axis=1).astype("float64")
+        tp = (pred & true_bool).sum(axis=1).astype("float64")
+        has_pred = pred_count > 0
+        predmask[t] = has_pred
+        prec_per[t, has_pred] = tp[has_pred] / pred_count[has_pred]
+        rec_per[t, nz_true] = tp[nz_true] / true_count[nz_true]
+        ru_per[t] = (true_bool & ~pred).astype("float64") @ ia_vec
+        mi_per[t] = (pred & ~true_bool).astype("float64") @ ia_vec
+    return prec_per, predmask, rec_per, ru_per, mi_per
+
+
+def _fmax_from_stats(prec_per, predmask, rec_per, idx):
+    import numpy as np
+
+    pm = predmask[:, idx]
+    denom = pm.sum(axis=1)
+    prec = np.zeros(prec_per.shape[0], dtype="float64")
+    ok = denom > 0
+    prec[ok] = (prec_per[:, idx] * pm)[ok].sum(axis=1) / denom[ok]
+    rec = rec_per[:, idx].mean(axis=1)
+    s = prec + rec
+    f1 = np.zeros_like(prec)
+    nz = s > 0
+    f1[nz] = 2 * prec[nz] * rec[nz] / s[nz]
+    return float(f1.max())
+
+
+def _smin_from_stats(ru_per, mi_per, idx):
+    import numpy as np
+
+    ru = ru_per[:, idx].mean(axis=1)
+    mi = mi_per[:, idx].mean(axis=1)
+    return float(np.sqrt(ru * ru + mi * mi).min())
+
+
+def paired_bootstrap_fmax_smin(prob_a, prob_b, true_matrix, ia, terms, *,
+                               n_boot=1000, seed=1337, ci=0.95, thresholds=None):
+    """Fast paired bootstrap CIs for the Fmax and Smin deltas (b - a) at once.
+
+    Equivalent to calling `paired_bootstrap_delta` with `fmax_matrix` and `smin`,
+    but ~3 orders of magnitude faster on wide matrices: the per-protein/per-threshold
+    statistics are precomputed once (see `_fmax_smin_perprotein`) so each of the
+    `n_boot` resamples is an O(thresholds x P) row average instead of a fresh
+    O(thresholds x P x N) sweep. Returns
+    {"fmax": {delta, lo, hi}, "smin": {delta, lo, hi}}; a CI excluding 0 (for Fmax)
+    or a Smin CI excluding 0 means the difference is significant.
+    """
+    import numpy as np
+
+    a = np.asarray(prob_a, dtype="float32")
+    b = np.asarray(prob_b, dtype="float32")
+    Y = np.asarray(true_matrix) > 0
+    P = Y.shape[0]
+    if thresholds is None:
+        thresholds = np.linspace(0.01, 1.0, 100)
+    ia_vec = np.array([ia.get(t, 0.0) for t in terms], dtype="float64")
+
+    sa = _fmax_smin_perprotein(a, Y, ia_vec, thresholds)
+    sb = _fmax_smin_perprotein(b, Y, ia_vec, thresholds)
+    full = np.arange(P)
+    obs_f = _fmax_from_stats(sb[0], sb[1], sb[2], full) - _fmax_from_stats(sa[0], sa[1], sa[2], full)
+    obs_s = _smin_from_stats(sb[3], sb[4], full) - _smin_from_stats(sa[3], sa[4], full)
+    if P == 0 or n_boot <= 0:
+        return {"fmax": {"delta": obs_f, "lo": obs_f, "hi": obs_f},
+                "smin": {"delta": obs_s, "lo": obs_s, "hi": obs_s}}
+
+    rng = np.random.RandomState(seed)
+    df = np.empty(n_boot, dtype="float64")
+    ds = np.empty(n_boot, dtype="float64")
+    for i in range(n_boot):
+        idx = rng.randint(0, P, size=P)
+        df[i] = _fmax_from_stats(sb[0], sb[1], sb[2], idx) - _fmax_from_stats(sa[0], sa[1], sa[2], idx)
+        ds[i] = _smin_from_stats(sb[3], sb[4], idx) - _smin_from_stats(sa[3], sa[4], idx)
+    half = (1.0 - ci) / 2.0 * 100.0
+    flo, fhi = np.percentile(df, [half, 100.0 - half])
+    slo, shi = np.percentile(ds, [half, 100.0 - half])
+    return {"fmax": {"delta": obs_f, "lo": float(flo), "hi": float(fhi)},
+            "smin": {"delta": obs_s, "lo": float(slo), "hi": float(shi)}}
+
+
 def fmax_by_namespace(prob_matrix, true_matrix, vocab) -> dict[str, FmaxResult]:
     """Per-namespace + micro-overall Fmax over a prediction matrix.
 
